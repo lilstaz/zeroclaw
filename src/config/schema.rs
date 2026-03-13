@@ -3013,6 +3013,8 @@ pub struct ChannelsConfig {
     pub feishu: Option<FeishuConfig>,
     /// DingTalk channel configuration.
     pub dingtalk: Option<DingTalkConfig>,
+    /// WeCom (WeChat Enterprise) Bot Webhook channel configuration.
+    pub wecom: Option<WeComConfig>,
     /// QQ Official Bot channel configuration.
     pub qq: Option<QQConfig>,
     #[cfg(feature = "channel-nostr")]
@@ -3098,6 +3100,10 @@ impl ChannelsConfig {
                 self.dingtalk.is_some(),
             ),
             (
+                Box::new(ConfigWrapper::new(self.wecom.as_ref())),
+                self.wecom.is_some(),
+            ),
+            (
                 Box::new(ConfigWrapper::new(self.qq.as_ref())),
                 self.qq.is_some()
             ),
@@ -3148,6 +3154,7 @@ impl Default for ChannelsConfig {
             lark: None,
             feishu: None,
             dingtalk: None,
+            wecom: None,
             qq: None,
             #[cfg(feature = "channel-nostr")]
             nostr: None,
@@ -3959,6 +3966,25 @@ impl ChannelConfig for DingTalkConfig {
     }
 }
 
+/// WeCom (WeChat Enterprise) Bot Webhook configuration
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WeComConfig {
+    /// Webhook key from WeCom Bot configuration
+    pub webhook_key: String,
+    /// Allowed user IDs. Empty = deny all, "*" = allow all
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+}
+
+impl ChannelConfig for WeComConfig {
+    fn name() -> &'static str {
+        "WeCom"
+    }
+    fn desc() -> &'static str {
+        "WeCom Bot Webhook"
+    }
+}
+
 /// QQ Official Bot configuration (Tencent QQ Bot SDK)
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QQConfig {
@@ -4742,6 +4768,13 @@ impl Config {
                     &store,
                     &mut dt.client_secret,
                     "config.channels_config.dingtalk.client_secret",
+                )?;
+            }
+            if let Some(ref mut wc) = config.channels_config.wecom {
+                decrypt_secret(
+                    &store,
+                    &mut wc.webhook_key,
+                    "config.channels_config.wecom.webhook_key",
                 )?;
             }
             if let Some(ref mut qq) = config.channels_config.qq {
@@ -5610,6 +5643,13 @@ impl Config {
                 "config.channels_config.dingtalk.client_secret",
             )?;
         }
+        if let Some(ref mut wc) = config_to_save.channels_config.wecom {
+            encrypt_secret(
+                &store,
+                &mut wc.webhook_key,
+                "config.channels_config.wecom.webhook_key",
+            )?;
+        }
         if let Some(ref mut qq) = config_to_save.channels_config.qq {
             encrypt_secret(
                 &store,
@@ -6057,6 +6097,7 @@ default_temperature = 0.7
                 lark: None,
                 feishu: None,
                 dingtalk: None,
+                wecom: None,
                 qq: None,
                 #[cfg(feature = "channel-nostr")]
                 nostr: None,
@@ -6731,6 +6772,7 @@ allowed_users = ["@ops:matrix.org"]
             lark: None,
             feishu: None,
             dingtalk: None,
+            wecom: None,
             qq: None,
             nostr: None,
             clawdtalk: None,
@@ -6945,6 +6987,7 @@ channel_id = "C123"
             lark: None,
             feishu: None,
             dingtalk: None,
+            wecom: None,
             qq: None,
             nostr: None,
             clawdtalk: None,
