@@ -20,6 +20,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use crate::providers::ChatMessage;
 
 /// The sub-protocol we support for the chat WebSocket.
 const WS_PROTOCOL: &str = "zeroclaw.v1";
@@ -119,6 +120,9 @@ pub async fn handle_ws_chat(
 async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<String>) {
     let (mut sender, mut receiver) = socket.split();
 
+    // Maintain conversation history for this WebSocket connection (chat-only, no tool execution)
+    let mut conversation_history: Vec<ChatMessage> = Vec::new();
+
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
             Ok(Message::Text(text)) => text,
@@ -161,7 +165,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<S
             "model": state.model,
         }));
 
-        // Simple single-turn chat (no streaming for now — use provider.chat_with_system)
+        // Chat-only mode with conversation history (no tool execution for security)
         let system_prompt = {
             let config_guard = state.config.lock();
             crate::channels::build_system_prompt(
@@ -174,10 +178,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<S
             )
         };
 
-        let messages = vec![
-            crate::providers::ChatMessage::system(system_prompt),
-            crate::providers::ChatMessage::user(&content),
-        ];
+        // Build messages: system prompt + conversation history + current user message
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+        messages.extend(conversation_history.clone());
+        messages.push(ChatMessage::user(&content));
 
         let multimodal_config = state.config.lock().multimodal.clone();
         let prepared =
@@ -207,6 +211,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<S
                     "full_response": response,
                 });
                 let _ = sender.send(Message::Text(done.to_string().into())).await;
+
+                // Update conversation history with this turn (chat-only, no tool execution)
+                conversation_history.push(ChatMessage::user(&content));
+                conversation_history.push(ChatMessage::assistant(&response));
 
                 // Broadcast agent_end event
                 let _ = state.event_tx.send(serde_json::json!({
