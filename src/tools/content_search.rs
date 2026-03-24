@@ -224,7 +224,11 @@ impl Tool for ContentSearchTool {
             }
         };
 
-        if !self.security.load().is_resolved_path_allowed(&resolved_canon) {
+        if !self
+            .security
+            .load()
+            .is_resolved_path_allowed(&resolved_canon)
+        {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

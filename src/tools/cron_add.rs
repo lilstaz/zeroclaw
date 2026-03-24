@@ -263,7 +263,11 @@ impl Tool for CronAddTool {
                     }
                 };
 
-                if let Err(reason) = self.security.load().validate_command_execution(command, approved) {
+                if let Err(reason) = self
+                    .security
+                    .load()
+                    .validate_command_execution(command, approved)
+                {
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),

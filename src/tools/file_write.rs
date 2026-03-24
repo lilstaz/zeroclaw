@@ -104,12 +104,17 @@ impl Tool for FileWriteTool {
             }
         };
 
-        if !self.security.load().is_resolved_path_allowed(&resolved_parent) {
+        if !self
+            .security
+            .load()
+            .is_resolved_path_allowed(&resolved_parent)
+        {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    self.security.load()
+                    self.security
+                        .load()
                         .resolved_path_violation_message(&resolved_parent),
                 ),
             });
@@ -125,12 +130,17 @@ impl Tool for FileWriteTool {
 
         let resolved_target = resolved_parent.join(file_name);
 
-        if self.security.load().is_runtime_config_path(&resolved_target) {
+        if self
+            .security
+            .load()
+            .is_runtime_config_path(&resolved_target)
+        {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    self.security.load()
+                    self.security
+                        .load()
                         .runtime_config_violation_message(&resolved_target),
                 ),
             });

@@ -11,8 +11,8 @@
 //! invocations.
 
 use crate::security::SecurityPolicy;
-use arc_swap::ArcSwap;
 use crate::tools::traits::{Tool, ToolResult};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use regex::Regex;
 use schemars::JsonSchema;
@@ -412,7 +412,10 @@ mod tests {
     }
 
     fn test_tool(config: BrowserDelegateConfig) -> BrowserDelegateTool {
-        BrowserDelegateTool::new(Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())), config)
+        BrowserDelegateTool::new(
+            Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())),
+            config,
+        )
     }
 
     // ── Config defaults ─────────────────────────────────────────────

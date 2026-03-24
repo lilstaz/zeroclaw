@@ -5,8 +5,8 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::workspace::WorkspaceManager;
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::fmt::Write;
@@ -20,7 +20,10 @@ pub struct WorkspaceTool {
 }
 
 impl WorkspaceTool {
-    pub fn new(manager: Arc<RwLock<WorkspaceManager>>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
+    pub fn new(
+        manager: Arc<RwLock<WorkspaceManager>>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
+    ) -> Self {
         Self { manager, security }
     }
 }
@@ -93,7 +96,8 @@ impl Tool for WorkspaceTool {
 
             "switch" => {
                 if let Err(error) = self
-                    .security.load()
+                    .security
+                    .load()
                     .enforce_tool_operation(ToolOperation::Act, "workspace")
                 {
                     return Ok(ToolResult {
@@ -129,7 +133,8 @@ impl Tool for WorkspaceTool {
 
             "create" => {
                 if let Err(error) = self
-                    .security.load()
+                    .security
+                    .load()
                     .enforce_tool_operation(ToolOperation::Act, "workspace")
                 {
                     return Ok(ToolResult {

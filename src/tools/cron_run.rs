@@ -97,7 +97,8 @@ impl Tool for CronRunTool {
 
         if matches!(job.job_type, JobType::Shell) {
             if let Err(reason) = self
-                .security.load()
+                .security
+                .load()
                 .validate_command_execution(&job.command, approved)
             {
                 return Ok(ToolResult {

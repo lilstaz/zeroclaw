@@ -12,10 +12,10 @@ use crate::providers::{
 };
 use crate::runtime;
 use crate::security::{AutonomyLevel, SecurityPolicy};
-use arc_swap::ArcSwap;
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -6049,11 +6049,13 @@ mod tests {
         ]);
 
         let tmp = TempDir::new().expect("temp dir");
-        let security = Arc::new(arc_swap::ArcSwap::from_pointee(crate::security::SecurityPolicy {
-            autonomy: crate::security::AutonomyLevel::Supervised,
-            workspace_dir: tmp.path().to_path_buf(),
-            ..crate::security::SecurityPolicy::default()
-        }));
+        let security = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::security::SecurityPolicy {
+                autonomy: crate::security::AutonomyLevel::Supervised,
+                workspace_dir: tmp.path().to_path_buf(),
+                ..crate::security::SecurityPolicy::default()
+            },
+        ));
         let runtime: Arc<dyn crate::runtime::RuntimeAdapter> =
             Arc::new(crate::runtime::NativeRuntime::new());
         let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(

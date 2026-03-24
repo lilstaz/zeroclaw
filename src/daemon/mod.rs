@@ -60,11 +60,17 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
                 .await;
     }
 
+    // Create the watch channel used to propagate config updates from the gateway
+    // to the channels subsystem (hot-reload).
+    let (config_watch_tx, config_watch_rx) =
+        tokio::sync::watch::channel(std::sync::Arc::new(config.clone()));
+
     let mut handles: Vec<JoinHandle<()>> = vec![spawn_state_writer(config.clone())];
 
     {
         let gateway_cfg = config.clone();
         let gateway_host = host.clone();
+        let gw_watch_tx = config_watch_tx;
         handles.push(spawn_component_supervisor(
             "gateway",
             initial_backoff,
@@ -72,27 +78,30 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             move || {
                 let cfg = gateway_cfg.clone();
                 let host = gateway_host.clone();
-                async move { Box::pin(crate::gateway::run_gateway(&host, port, cfg)).await }
+                let watch_tx = Some(gw_watch_tx.clone());
+                async move {
+                    Box::pin(crate::gateway::run_gateway(&host, port, cfg, watch_tx)).await
+                }
             },
         ));
     }
 
     {
-        if has_supervised_channels(&config) {
-            let channels_cfg = config.clone();
-            handles.push(spawn_component_supervisor(
-                "channels",
-                initial_backoff,
-                max_backoff,
-                move || {
-                    let cfg = channels_cfg.clone();
-                    async move { Box::pin(crate::channels::start_channels(cfg)).await }
-                },
-            ));
-        } else {
-            crate::health::mark_component_ok("channels");
-            tracing::info!("No real-time channels configured; channel supervisor disabled");
-        }
+        // Always start channel supervisor — even with no channels configured at startup.
+        // The config watcher task inside start_channels() must run so that
+        // PUT /api/config can hot-add channels later.
+        let channels_cfg = config.clone();
+        let ch_watch_rx = config_watch_rx;
+        handles.push(spawn_component_supervisor(
+            "channels",
+            initial_backoff,
+            max_backoff,
+            move || {
+                let cfg = channels_cfg.clone();
+                let watch_rx = Some(ch_watch_rx.clone());
+                async move { Box::pin(crate::channels::start_channels(cfg, watch_rx)).await }
+            },
+        ));
     }
 
     if config.heartbeat.enabled {
@@ -751,14 +760,6 @@ fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<(
     Ok(())
 }
 
-fn has_supervised_channels(config: &Config) -> bool {
-    config
-        .channels_config
-        .channels_except_webhook()
-        .iter()
-        .any(|(_, ok)| *ok)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,81 +820,6 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("component exited unexpectedly"));
-    }
-
-    #[test]
-    fn detects_no_supervised_channels() {
-        let config = Config::default();
-        assert!(!has_supervised_channels(&config));
-    }
-
-    #[test]
-    fn detects_supervised_channels_present() {
-        let mut config = Config::default();
-        config.channels_config.telegram = Some(crate::config::TelegramConfig {
-            bot_token: "token".into(),
-            allowed_users: vec![],
-            stream_mode: crate::config::StreamMode::default(),
-            draft_update_interval_ms: 1000,
-            interrupt_on_new_message: false,
-            mention_only: false,
-            ack_reactions: None,
-            proxy_url: None,
-        });
-        assert!(has_supervised_channels(&config));
-    }
-
-    #[test]
-    fn detects_dingtalk_as_supervised_channel() {
-        let mut config = Config::default();
-        config.channels_config.dingtalk = Some(crate::config::schema::DingTalkConfig {
-            client_id: "client_id".into(),
-            client_secret: "client_secret".into(),
-            allowed_users: vec!["*".into()],
-            proxy_url: None,
-        });
-        assert!(has_supervised_channels(&config));
-    }
-
-    #[test]
-    fn detects_mattermost_as_supervised_channel() {
-        let mut config = Config::default();
-        config.channels_config.mattermost = Some(crate::config::schema::MattermostConfig {
-            url: "https://mattermost.example.com".into(),
-            bot_token: "token".into(),
-            channel_id: Some("channel-id".into()),
-            allowed_users: vec!["*".into()],
-            thread_replies: Some(true),
-            mention_only: Some(false),
-            interrupt_on_new_message: false,
-            proxy_url: None,
-        });
-        assert!(has_supervised_channels(&config));
-    }
-
-    #[test]
-    fn detects_qq_as_supervised_channel() {
-        let mut config = Config::default();
-        config.channels_config.qq = Some(crate::config::schema::QQConfig {
-            app_id: "app-id".into(),
-            app_secret: "app-secret".into(),
-            allowed_users: vec!["*".into()],
-            proxy_url: None,
-        });
-        assert!(has_supervised_channels(&config));
-    }
-
-    #[test]
-    fn detects_nextcloud_talk_as_supervised_channel() {
-        let mut config = Config::default();
-        config.channels_config.nextcloud_talk = Some(crate::config::schema::NextcloudTalkConfig {
-            base_url: "https://cloud.example.com".into(),
-            app_token: "app-token".into(),
-            webhook_secret: None,
-            allowed_users: vec!["*".into()],
-            proxy_url: None,
-        });
-        assert!(has_supervised_channels(&config));
     }
 
     #[test]

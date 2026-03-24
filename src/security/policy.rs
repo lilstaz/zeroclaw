@@ -3087,7 +3087,6 @@ mod tests {
 
     #[test]
     fn tracker_arc_is_shared_not_deep_copied() {
-        use std::sync::Arc;
         let policy = SecurityPolicy::from_config(
             &crate::config::AutonomyConfig::default(),
             &std::path::PathBuf::from("/tmp"),
@@ -3096,6 +3095,10 @@ mod tests {
         let cloned_tracker = policy.tracker.clone(); // Arc::clone
         cloned_tracker.record();
         // Both accesses go to the same underlying ActionTracker
-        assert_eq!(policy.tracker.count(), 2, "tracker clone should share state via Arc");
+        assert_eq!(
+            policy.tracker.count(),
+            2,
+            "tracker clone should share state via Arc"
+        );
     }
 }

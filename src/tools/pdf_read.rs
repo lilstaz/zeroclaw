@@ -114,12 +114,17 @@ impl Tool for PdfReadTool {
             }
         };
 
-        if !self.security.load().is_resolved_path_allowed(&resolved_path) {
+        if !self
+            .security
+            .load()
+            .is_resolved_path_allowed(&resolved_path)
+        {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    self.security.load()
+                    self.security
+                        .load()
                         .resolved_path_violation_message(&resolved_path),
                 ),
             });

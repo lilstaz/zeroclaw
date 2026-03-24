@@ -1,8 +1,8 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::{ClassificationRule, Config, DelegateAgentConfig, ModelRouteConfig};
 use crate::security::SecurityPolicy;
-use arc_swap::ArcSwap;
 use crate::util::MaybeSet;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

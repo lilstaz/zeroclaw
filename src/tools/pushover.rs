@@ -222,7 +222,10 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn test_security(level: AutonomyLevel, max_actions_per_hour: u32) -> Arc<ArcSwap<SecurityPolicy>> {
+    fn test_security(
+        level: AutonomyLevel,
+        max_actions_per_hour: u32,
+    ) -> Arc<ArcSwap<SecurityPolicy>> {
         Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: level,
             max_actions_per_hour,

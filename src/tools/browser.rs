@@ -7,8 +7,8 @@
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
-use arc_swap::ArcSwap;
 use anyhow::Context;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

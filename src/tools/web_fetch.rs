@@ -338,12 +338,9 @@ impl Tool for WebFetchTool {
                 return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
             }
 
-            if let Err(err) = validate_target_url(
-                attempt.url().as_str(),
-                &allowed,
-                &blocked,
-                "web_fetch",
-            ) {
+            if let Err(err) =
+                validate_target_url(attempt.url().as_str(), &allowed, &blocked, "web_fetch")
+            {
                 return attempt.error(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("Blocked redirect target: {err}"),

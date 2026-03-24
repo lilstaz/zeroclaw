@@ -544,7 +544,11 @@ impl Tool for JiraTool {
             _ => unreachable!(),
         };
 
-        if let Err(error) = self.security.load().enforce_tool_operation(operation, "jira") {
+        if let Err(error) = self
+            .security
+            .load()
+            .enforce_tool_operation(operation, "jira")
+        {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

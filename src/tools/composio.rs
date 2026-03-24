@@ -8,9 +8,9 @@
 
 use super::traits::{Tool, ToolResult};
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use anyhow::Context;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use reqwest::Client;

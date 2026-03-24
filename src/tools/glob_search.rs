@@ -90,7 +90,8 @@ impl Tool for GlobSearchTool {
         // Build full pattern: use resolve_tool_path to handle tilde expansion
         // and absolute paths correctly.
         let full_pattern = self
-            .security.load()
+            .security
+            .load()
             .resolve_tool_path(pattern)
             .to_string_lossy()
             .to_string();

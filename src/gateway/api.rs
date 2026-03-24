@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde::Deserialize;
+use std::sync::Arc;
 
 const MASKED_SECRET: &str = "***MASKED***";
 
@@ -199,8 +200,18 @@ pub async fn handle_api_config_put(
             .into_response();
     }
 
+    // Build the Arc before writing so both the mutex write and the watch send
+    // use the exact same value, eliminating any window for a concurrent writer
+    // to slip in between the two operations.
+    let arc_config = Arc::new(new_config.clone());
+
     // Update in-memory config
     *state.config.lock() = new_config;
+
+    // Notify config watcher (if wired) so hot-reload propagates to channels.
+    if let Some(ref tx) = state.config_watch_tx {
+        let _ = tx.send(arc_config);
+    }
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
@@ -1523,6 +1534,7 @@ mod tests {
             pending_pairings: None,
             path_prefix: String::new(),
             canvas_store: crate::tools::canvas::CanvasStore::new(),
+            config_watch_tx: None,
         }
     }
 

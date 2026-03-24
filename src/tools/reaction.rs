@@ -8,8 +8,8 @@
 use super::traits::{Tool, ToolResult};
 use crate::channels::traits::Channel;
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::json;
@@ -92,7 +92,8 @@ impl Tool for ReactionTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Security gate
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Act, "reaction")
         {
             return Ok(ToolResult {

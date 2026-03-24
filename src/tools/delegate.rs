@@ -5,8 +5,8 @@ use crate::config::{DelegateAgentConfig, DelegateToolConfig};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::json;
@@ -397,7 +397,8 @@ impl DelegateTool {
         }
 
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Act, "delegate")
         {
             return Ok(ToolResult {

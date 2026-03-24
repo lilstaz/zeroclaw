@@ -15,8 +15,10 @@
 //! [`start_channels`]. See `AGENTS.md` §7.2 for the full change playbook.
 
 pub mod bluesky;
+pub mod channel_factory;
 pub mod clawdtalk;
 pub mod cli;
+pub mod config_watcher;
 pub mod dingtalk;
 pub mod discord;
 pub mod discord_history;
@@ -28,6 +30,7 @@ pub mod irc;
 pub mod lark;
 pub mod link_enricher;
 pub mod linq;
+pub mod manager;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 pub mod mattermost;
@@ -111,11 +114,11 @@ use crate::observability::traits::{ObserverEvent, ObserverMetric};
 use crate::observability::{self, runtime_trace, Observer};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
-use arc_swap::ArcSwap;
 use crate::security::{AutonomyLevel, SecurityPolicy};
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use portable_atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -353,7 +356,7 @@ pub struct HotChannelConfig {
 
 #[derive(Clone)]
 struct ChannelRuntimeContext {
-    channels_by_name: Arc<HashMap<String, Arc<dyn Channel>>>,
+    channels_by_name: Arc<ArcSwap<HashMap<String, Arc<dyn Channel>>>>,
     provider: Arc<dyn Provider>,
     default_provider: Arc<String>,
     prompt_config: Arc<crate::config::Config>,
@@ -2202,6 +2205,74 @@ fn spawn_supervised_listener_with_health_interval(
     })
 }
 
+/// Like `spawn_supervised_listener_with_health_interval`, but accepts a
+/// `CancellationToken` so the channel can be stopped for hot-reload reconciliation.
+pub(crate) fn spawn_supervised_listener_cancellable(
+    ch: Arc<dyn Channel>,
+    tx: tokio::sync::mpsc::Sender<traits::ChannelMessage>,
+    initial_backoff_secs: u64,
+    max_backoff_secs: u64,
+    cancel_token: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let health_interval = Duration::from_secs(CHANNEL_HEALTH_HEARTBEAT_SECS);
+    tokio::spawn(async move {
+        let component = format!("channel:{}", ch.name());
+        let mut backoff = initial_backoff_secs.max(1);
+        let max_backoff = max_backoff_secs.max(backoff);
+
+        loop {
+            crate::health::mark_component_ok(&component);
+            let mut health = tokio::time::interval(health_interval);
+            health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            let result = {
+                let listen_future = ch.listen(tx.clone());
+                tokio::pin!(listen_future);
+
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("{} channel stopped for hot-reload", ch.name());
+                            return; // Exit the entire spawned task
+                        }
+                        _ = health.tick() => {
+                            crate::health::mark_component_ok(&component);
+                        }
+                        result = &mut listen_future => break result,
+                    }
+                }
+            };
+
+            if tx.is_closed() || cancel_token.is_cancelled() {
+                break;
+            }
+
+            match result {
+                Ok(()) => {
+                    tracing::warn!("Channel {} exited, restarting in {backoff}s...", ch.name());
+                    backoff = initial_backoff_secs.max(1);
+                }
+                Err(e) => {
+                    crate::health::mark_component_error(&component, e.to_string());
+                    tracing::error!(
+                        "Channel {} failed: {e}, restarting in {backoff}s...",
+                        ch.name()
+                    );
+                }
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("{} channel stopped during backoff", ch.name());
+                    return;
+                }
+            }
+            backoff = backoff.saturating_mul(2).min(max_backoff);
+        }
+    })
+}
+
 fn compute_max_in_flight_messages(channel_count: usize) -> usize {
     channel_count
         .saturating_mul(CHANNEL_PARALLELISM_PER_CHANNEL)
@@ -2321,15 +2392,15 @@ async fn process_channel_message(
         }
     }
 
-    let target_channel = ctx
-        .channels_by_name
+    let channels_map = ctx.channels_by_name.load();
+    let target_channel = channels_map
         .get(&msg.channel)
         .or_else(|| {
             // Multi-room channels use "name:qualifier" format (e.g. "matrix:!roomId");
             // fall back to base channel name for routing.
             msg.channel
                 .split_once(':')
-                .and_then(|(base, _)| ctx.channels_by_name.get(base))
+                .and_then(|(base, _)| channels_map.get(base))
         })
         .cloned();
     if let Err(err) = maybe_apply_runtime_config_update(ctx.as_ref()).await {
@@ -3210,15 +3281,13 @@ async fn run_message_dispatch_loop(
             } else {
                 "No in-flight task for this sender scope.".to_string()
             };
-            let channel = ctx
-                .channels_by_name
+            let cbn = ctx.channels_by_name.load();
+            let channel = cbn
                 .get(&msg.channel)
                 .or_else(|| {
-                    // Multi-room channels use "name:qualifier" format (e.g. "matrix:!roomId");
-                    // fall back to base channel name for routing.
                     msg.channel
                         .split_once(':')
-                        .and_then(|(base, _)| ctx.channels_by_name.get(base))
+                        .and_then(|(base, _)| cbn.get(base))
                 })
                 .cloned();
             if let Some(channel) = channel {
@@ -4561,7 +4630,10 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
 
 /// Start all configured channels and route messages to the agent
 #[allow(clippy::too_many_lines)]
-pub async fn start_channels(config: Config) -> Result<()> {
+pub async fn start_channels(
+    config: Config,
+    config_watch_rx: Option<tokio::sync::watch::Receiver<Arc<Config>>>,
+) -> Result<()> {
     let provider_name = resolved_default_provider(&config);
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
@@ -4868,32 +4940,32 @@ pub async fn start_channels(config: Config) -> Result<()> {
         ));
     }
     if channels.is_empty() {
-        println!("No channels configured. Run `zeroclaw onboard` to set up channels.");
-        return Ok(());
+        println!("  \u{2139}\u{fe0f}  No channels configured at startup.");
+        println!("     Hot-add channels via PUT /api/config.");
+    } else {
+        println!("🦀 ZeroClaw Channel Server");
+        println!("  🤖 Model:    {model}");
+        let effective_backend = memory::effective_memory_backend_name(
+            &config.memory.backend,
+            Some(&config.storage.provider.config),
+        );
+        println!(
+            "  🧠 Memory:   {} (auto-save: {})",
+            effective_backend,
+            if config.memory.auto_save { "on" } else { "off" }
+        );
+        println!(
+            "  📡 Channels: {}",
+            channels
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!();
+        println!("  Listening for messages... (Ctrl+C to stop)");
+        println!();
     }
-
-    println!("🦀 ZeroClaw Channel Server");
-    println!("  🤖 Model:    {model}");
-    let effective_backend = memory::effective_memory_backend_name(
-        &config.memory.backend,
-        Some(&config.storage.provider.config),
-    );
-    println!(
-        "  🧠 Memory:   {} (auto-save: {})",
-        effective_backend,
-        if config.memory.auto_save { "on" } else { "off" }
-    );
-    println!(
-        "  📡 Channels: {}",
-        channels
-            .iter()
-            .map(|c| c.name())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    println!();
-    println!("  Listening for messages... (Ctrl+C to stop)");
-    println!();
 
     crate::health::mark_component_ok("channels");
 
@@ -4908,6 +4980,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
 
     // Single message bus — all channels send messages here
     let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(100);
+    // Save a clone of tx for ChannelManager (hot-reload may spawn new channels after
+    // the original tx is dropped below).
+    let tx_for_manager = tx.clone();
 
     // Spawn a listener for each channel
     let mut handles = Vec::new();
@@ -4921,17 +4996,17 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
     drop(tx); // Drop our copy so rx closes when all channels stop
 
-    let channels_by_name = Arc::new(
+    let channels_by_name = Arc::new(ArcSwap::from_pointee(
         channels
             .iter()
             .map(|ch| (ch.name().to_string(), Arc::clone(ch)))
             .collect::<HashMap<_, _>>(),
-    );
+    ));
 
     // Populate the reaction tool's channel map now that channels are initialized.
     if let Some(ref handle) = reaction_handle_ch {
         let mut map = handle.write();
-        for (name, ch) in channels_by_name.as_ref() {
+        for (name, ch) in channels_by_name.load().iter() {
             map.insert(name.clone(), Arc::clone(ch));
         }
     }
@@ -4978,8 +5053,21 @@ pub async fn start_channels(config: Config) -> Result<()> {
         .as_ref()
         .is_some_and(|mx| mx.interrupt_on_new_message);
 
+    // Extracted so the config watcher can update the same Arc atomically.
+    let hot_config: Arc<ArcSwap<HotChannelConfig>> =
+        Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+            autonomy_level: config.autonomy.level,
+            non_cli_excluded_tools: config.autonomy.non_cli_excluded_tools.clone(),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
+        }));
+    let domain_rules: Arc<ArcSwap<crate::tools::WebFetchDomainRules>> =
+        Arc::new(ArcSwap::from_pointee(crate::tools::WebFetchDomainRules {
+            allowed_domains: config.web_fetch.allowed_domains.clone(),
+            blocked_domains: config.web_fetch.blocked_domains.clone(),
+        }));
+
     let runtime_ctx = Arc::new(ChannelRuntimeContext {
-        channels_by_name,
+        channels_by_name: channels_by_name.clone(),
         provider: Arc::clone(&provider),
         default_provider: Arc::new(provider_name),
         prompt_config: Arc::new(config.clone()),
@@ -5026,11 +5114,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         } else {
             None
         },
-        hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
-            autonomy_level: config.autonomy.level,
-            non_cli_excluded_tools: config.autonomy.non_cli_excluded_tools.clone(),
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
-        })),
+        hot: Arc::clone(&hot_config),
         tool_call_dedup_exempt: Arc::new(config.agent.tool_call_dedup_exempt.clone()),
         model_routes: Arc::new(config.model_routes.clone()),
         query_classification: config.query_classification.clone(),
@@ -5061,6 +5145,32 @@ pub async fn start_channels(config: Config) -> Result<()> {
         }),
         pacing: config.pacing.clone(),
     });
+
+    // Hot-reload watcher: handles config changes from PUT /api/config.
+    // Note: channels started above via `spawn_supervised_listener_with_health_interval`
+    // are NOT tracked in the ChannelManager. This means hot-reload reconciliation
+    // only affects channels started/stopped by the watcher itself (after first reload).
+    // A full restart is required to hot-reload channels that were already running at boot.
+    // TODO: migrate initial channel spawns into ChannelManager for full hot-reload coverage.
+    if let Some(watch_rx) = config_watch_rx {
+        let initial_config = Arc::new(config.clone());
+        let channel_manager = Arc::new(tokio::sync::Mutex::new(
+            crate::channels::manager::ChannelManager::new(
+                tx_for_manager,
+                initial_backoff_secs,
+                max_backoff_secs,
+                channels_by_name.clone(),
+            ),
+        ));
+        tokio::spawn(crate::channels::config_watcher::run_config_watcher(
+            watch_rx,
+            initial_config,
+            Arc::clone(&security),
+            Arc::clone(&hot_config),
+            Arc::clone(&domain_rules),
+            channel_manager,
+        ));
+    }
 
     // Hydrate in-memory conversation histories from persisted JSONL session files.
     if let Some(ref store) = runtime_ctx.session_store {
@@ -5388,7 +5498,7 @@ mod tests {
         );
 
         let ctx = ChannelRuntimeContext {
-            channels_by_name: Arc::new(HashMap::new()),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             provider: Arc::new(DummyProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -5509,7 +5619,7 @@ mod tests {
     fn append_sender_turn_stores_single_turn_per_call() {
         let sender = "telegram_u2".to_string();
         let ctx = ChannelRuntimeContext {
-            channels_by_name: Arc::new(HashMap::new()),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             provider: Arc::new(DummyProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -5586,7 +5696,7 @@ mod tests {
             ],
         );
         let ctx = ChannelRuntimeContext {
-            channels_by_name: Arc::new(HashMap::new()),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             provider: Arc::new(DummyProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -5682,7 +5792,7 @@ mod tests {
         );
 
         let ctx = ChannelRuntimeContext {
-            channels_by_name: Arc::new(HashMap::new()),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             provider: Arc::new(DummyProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6228,7 +6338,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(ToolCallingProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6315,7 +6425,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(ToolCallingProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6416,7 +6526,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(RawToolArtifactProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6502,7 +6612,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(ToolCallingAliasProvider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6598,7 +6708,7 @@ BTC is currently around $65,000 based on latest tool output."#
         provider_cache_seed.insert("openrouter".to_string(), fallback_provider);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&default_provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6715,7 +6825,7 @@ BTC is currently around $65,000 based on latest tool output."#
         );
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&default_provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6813,7 +6923,7 @@ BTC is currently around $65,000 based on latest tool output."#
         provider_cache_seed.insert("test-provider".to_string(), reloaded_provider);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&startup_provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -6923,7 +7033,7 @@ BTC is currently around $65,000 based on latest tool output."#
         }
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -7022,7 +7132,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(IterativeToolProvider {
                 required_tool_iterations: 11,
             }),
@@ -7113,7 +7223,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(IterativeToolProvider {
                 required_tool_iterations: 20,
             }),
@@ -7322,7 +7432,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(SlowProvider {
                 delay: Duration::from_millis(250),
             }),
@@ -7433,7 +7543,7 @@ BTC is currently around $65,000 based on latest tool output."#
         });
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: provider_impl.clone(),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -7557,7 +7667,7 @@ BTC is currently around $65,000 based on latest tool output."#
         });
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: provider_impl.clone(),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -7676,7 +7786,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(SlowProvider {
                 delay: Duration::from_millis(180),
             }),
@@ -7779,7 +7889,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(SlowProvider {
                 delay: Duration::from_millis(20),
             }),
@@ -7865,7 +7975,7 @@ BTC is currently around $65,000 based on latest tool output."#
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(SlowProvider {
                 delay: Duration::from_millis(5),
             }),
@@ -8650,7 +8760,7 @@ BTC is currently around $65,000 based on latest tool output."#
         let provider_impl = Arc::new(HistoryCaptureProvider::default());
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: provider_impl.clone(),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -8788,7 +8898,7 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let provider_impl = Arc::new(HistoryCaptureProvider::default());
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: provider_impl.clone(),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -8967,7 +9077,7 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let provider_impl = Arc::new(HistoryCaptureProvider::default());
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: provider_impl.clone(),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(RecallMemory),
@@ -9081,7 +9191,7 @@ BTC is currently around $65,000 based on latest tool output."#
         );
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: provider_impl.clone(),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -9659,7 +9769,7 @@ This is an example JSON object for profile settings."#;
 
         // DummyProvider has default capabilities (vision: false).
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(DummyProvider),
             default_provider: Arc::new("dummy".to_string()),
             memory: Arc::new(NoopMemory),
@@ -9752,7 +9862,7 @@ This is an example JSON object for profile settings."#;
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(DummyProvider),
             default_provider: Arc::new("dummy".to_string()),
             memory: Arc::new(NoopMemory),
@@ -9921,7 +10031,7 @@ This is an example JSON object for profile settings."#;
         }];
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&default_provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -10038,7 +10148,7 @@ This is an example JSON object for profile settings."#;
         }];
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&default_provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -10147,7 +10257,7 @@ This is an example JSON object for profile settings."#;
         }];
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&default_provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -10276,7 +10386,7 @@ This is an example JSON object for profile settings."#;
         ];
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::clone(&default_provider),
             default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
@@ -10544,7 +10654,7 @@ This is an example JSON object for profile settings."#;
         channels_by_name.insert(channel.name().to_string(), channel);
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
-            channels_by_name: Arc::new(channels_by_name),
+            channels_by_name: Arc::new(ArcSwap::from_pointee(channels_by_name)),
             provider: Arc::new(SlowProvider {
                 delay: Duration::from_millis(150),
             }),

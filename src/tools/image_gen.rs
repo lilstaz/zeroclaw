@@ -1,8 +1,8 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use anyhow::Context;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
@@ -272,7 +272,8 @@ impl Tool for ImageGenTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Security: image generation is a side-effecting action (HTTP + file write).
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Act, "image_gen")
         {
             return Ok(ToolResult {

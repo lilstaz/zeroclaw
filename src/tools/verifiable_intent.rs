@@ -6,7 +6,6 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use crate::tools::traits::{Tool, ToolResult};
 use crate::verifiable_intent::error::ViError;
@@ -15,6 +14,7 @@ use crate::verifiable_intent::verification::{
     check_constraints, verify_sd_hash_binding, verify_timestamps, ConstraintCheckResult,
     StrictnessMode,
 };
+use arc_swap::ArcSwap;
 
 /// Tool for verifying Verifiable Intent credential chains and evaluating
 /// constraints against fulfillment data.
@@ -84,7 +84,8 @@ impl Tool for VerifiableIntentTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Read, "vi_verify")
         {
             return Ok(ToolResult {

@@ -2,8 +2,8 @@ use super::traits::{Tool, ToolResult};
 use crate::config::{DelegateAgentConfig, SwarmConfig, SwarmStrategy};
 use crate::providers::{self, Provider};
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashMap;
@@ -524,7 +524,8 @@ impl Tool for SwarmTool {
         }
 
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Act, "swarm")
         {
             return Ok(ToolResult {

@@ -111,7 +111,11 @@ impl Tool for SkillShellTool {
 
         // Security validation — always requires explicit approval (approved=true)
         // since skill tools are user-defined and should be treated as medium-risk.
-        match self.security.load().validate_command_execution(&command, true) {
+        match self
+            .security
+            .load()
+            .validate_command_execution(&command, true)
+        {
             Ok(_) => {}
             Err(reason) => {
                 return Ok(ToolResult {

@@ -8,8 +8,8 @@
 use super::traits::{Tool, ToolResult};
 use crate::channels::session_backend::SessionBackend;
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::fmt::Write;
@@ -146,7 +146,8 @@ impl Tool for SessionsHistoryTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Read, "sessions_history")
         {
             return Ok(ToolResult {
@@ -246,7 +247,8 @@ impl Tool for SessionsSendTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Act, "sessions_send")
         {
             return Ok(ToolResult {

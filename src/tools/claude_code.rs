@@ -1,8 +1,8 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::ClaudeCodeConfig;
 use crate::security::policy::ToolOperation;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -90,7 +90,8 @@ impl Tool for ClaudeCodeTool {
 
         // Enforce act policy
         if let Err(error) = self
-            .security.load()
+            .security
+            .load()
             .enforce_tool_operation(ToolOperation::Act, "claude_code")
         {
             return Ok(ToolResult {

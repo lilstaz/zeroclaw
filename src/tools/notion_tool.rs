@@ -237,7 +237,11 @@ impl Tool for NotionTool {
             }
         };
 
-        if let Err(error) = self.security.load().enforce_tool_operation(operation, "notion") {
+        if let Err(error) = self
+            .security
+            .load()
+            .enforce_tool_operation(operation, "notion")
+        {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

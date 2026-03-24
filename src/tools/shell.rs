@@ -1,8 +1,8 @@
 use super::traits::{Tool, ToolResult};
 use crate::runtime::RuntimeAdapter;
 use crate::security::traits::Sandbox;
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashSet;
@@ -154,7 +154,11 @@ impl Tool for ShellTool {
             });
         }
 
-        match self.security.load().validate_command_execution(command, approved) {
+        match self
+            .security
+            .load()
+            .validate_command_execution(command, approved)
+        {
             Ok(_) => {}
             Err(reason) => {
                 return Ok(ToolResult {

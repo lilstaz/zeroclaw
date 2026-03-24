@@ -27,13 +27,13 @@ use crate::memory::{self, Memory, MemoryCategory};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
 use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
-use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use crate::tools;
 use crate::tools::canvas::CanvasStore;
 use crate::tools::traits::ToolSpec;
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use axum::{
     body::Bytes,
     extract::{ConnectInfo, Query, State},
@@ -363,11 +363,18 @@ pub struct AppState {
     pub pending_pairings: Option<Arc<api_pairing::PairingStore>>,
     /// Shared canvas store for Live Canvas (A2UI) system
     pub canvas_store: CanvasStore,
+    /// Watch channel sender for config hot-reload notifications.
+    pub config_watch_tx: Option<tokio::sync::watch::Sender<Arc<crate::config::Config>>>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines)]
-pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
+pub async fn run_gateway(
+    host: &str,
+    port: u16,
+    config: Config,
+    config_watch_tx: Option<tokio::sync::watch::Sender<Arc<crate::config::Config>>>,
+) -> Result<()> {
     // ── Security: refuse public bind without tunnel or explicit opt-in ──
     if is_public_bind(host) && config.tunnel.provider == "none" && !config.gateway.allow_public_bind
     {
@@ -839,6 +846,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
         canvas_store,
+        config_watch_tx,
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -2137,6 +2145,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -2195,6 +2204,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -2583,6 +2593,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2655,6 +2666,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let headers = HeaderMap::new();
@@ -2739,6 +2751,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let response = handle_webhook(
@@ -2795,6 +2808,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2856,6 +2870,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2922,6 +2937,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let response = Box::pin(handle_nextcloud_talk_webhook(
@@ -2984,6 +3000,7 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            config_watch_tx: None,
         };
 
         let mut headers = HeaderMap::new();
