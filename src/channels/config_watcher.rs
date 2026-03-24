@@ -30,6 +30,11 @@ pub async fn run_config_watcher(
             tracing::debug!("config watch sender dropped, watcher exiting");
             break;
         }
+        // Debounce: drain rapid successive updates within 200ms
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        while config_rx.has_changed().unwrap_or(false) {
+            config_rx.borrow_and_update();
+        }
         let new_config = config_rx.borrow_and_update().clone();
 
         // Autonomy — update SecurityPolicy + HotChannelConfig
@@ -63,13 +68,36 @@ pub async fn run_config_watcher(
             tracing::info!("hot-reloaded: web_fetch domain rules");
         }
 
-        // Channels — per-channel diff for the 4 supported channels only
-        let channel_diff =
-            diff_channel_configs(&prev_config.channels_config, &new_config.channels_config);
-        if !channel_diff.is_empty() {
+        // Channels — per-channel diff across all supported channels
+        let channel_diff = diff_channel_configs(
+            &prev_config.channels_config,
+            &new_config.channels_config,
+        );
+
+        let hot_reloadable: std::collections::HashSet<&str> =
+            crate::config::ChannelsConfig::hot_reloadable_channel_names()
+                .iter()
+                .copied()
+                .collect();
+
+        let (hot, skipped): (Vec<_>, Vec<_>) = channel_diff
+            .into_iter()
+            .partition(|(name, _)| hot_reloadable.contains(name.as_str()));
+
+        if !skipped.is_empty() {
+            let names: Vec<_> = skipped.iter().map(|(n, _)| n.as_str()).collect();
+            tracing::warn!(
+                "config changed for non-hot-reloadable channels (restart required): {}",
+                names.join(", ")
+            );
+        }
+
+        if !hot.is_empty() {
             let mut mgr = channel_manager.lock().await;
-            if let Err(e) = mgr.reconcile_diff(&channel_diff, &new_config).await {
+            if let Err(e) = mgr.reconcile_diff(&hot, &new_config).await {
                 tracing::error!("channel reconcile failed: {e}");
+            } else {
+                tracing::info!("hot-reloaded: {} channel(s) changed", hot.len());
             }
         }
 
@@ -80,18 +108,29 @@ pub async fn run_config_watcher(
     }
 }
 
-/// Compare the 4 hot-reloadable channel configs between old and new.
+macro_rules! diff_all_channels {
+    ($old:expr, $new:expr, $out:expr, $($field:ident),+ $(,)?) => {
+        $(diff_option(stringify!($field), &$old.$field, &$new.$field, $out);)+
+    };
+}
+
+/// Compare all hot-reloadable channel configs between old and new.
 /// Returns a list of `(channel_name, ChannelChange)` pairs for channels that changed.
 pub fn diff_channel_configs(
     old: &ChannelsConfig,
     new: &ChannelsConfig,
 ) -> Vec<(String, ChannelChange)> {
     let mut diffs = Vec::new();
-    diff_option("feishu", &old.feishu, &new.feishu, &mut diffs);
-    // lark: handled by feishu runtime, same config struct — no separate build_lark factory
-    diff_option("dingtalk", &old.dingtalk, &new.dingtalk, &mut diffs);
-    diff_option("wecom", &old.wecom, &new.wecom, &mut diffs);
-    diff_option("mattermost", &old.mattermost, &new.mattermost, &mut diffs);
+    diff_all_channels!(old, new, &mut diffs,
+        telegram, discord, slack, mattermost, feishu, dingtalk, wecom,
+        irc, nextcloud_talk, qq, email, gmail_push, reddit, bluesky,
+        twitter, mochat, wati, linq, clawdtalk, imessage, matrix,
+        signal, whatsapp, lark, discord_history
+    );
+    #[cfg(feature = "channel-nostr")]
+    diff_option("nostr", &old.nostr, &new.nostr, &mut diffs);
+    #[cfg(feature = "voice-wake")]
+    diff_option("voice_wake", &old.voice_wake, &new.voice_wake, &mut diffs);
     diffs
 }
 
@@ -112,7 +151,7 @@ fn diff_option<T: PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::*;
+    use crate::config::schema::{StreamMode, TelegramConfig, *};
     use std::collections::HashMap;
 
     #[test]
@@ -174,6 +213,26 @@ mod tests {
         let config = ChannelsConfig::default();
         let diff = diff_channel_configs(&config, &config);
         assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn diff_detects_telegram_added() {
+        let old = ChannelsConfig::default();
+        let mut new = ChannelsConfig::default();
+        new.telegram = Some(TelegramConfig {
+            bot_token: "token".into(),
+            allowed_users: vec![],
+            stream_mode: StreamMode::default(),
+            draft_update_interval_ms: 1000,
+            interrupt_on_new_message: false,
+            mention_only: false,
+            ack_reactions: None,
+            proxy_url: None,
+        });
+        let diff = diff_channel_configs(&old, &new);
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0].0, "telegram");
+        assert_eq!(diff[0].1, ChannelChange::Added);
     }
 
     #[tokio::test]
@@ -284,5 +343,20 @@ mod tests {
 
         let loaded = domain_rules.load();
         assert!(loaded.blocked_domains.contains(&"evil.com".to_string()));
+    }
+
+    #[test]
+    fn matrix_is_not_hot_reloadable() {
+        let hot = crate::config::ChannelsConfig::hot_reloadable_channel_names();
+        assert!(!hot.contains(&"matrix"));
+        assert!(!hot.contains(&"signal"));
+        assert!(!hot.contains(&"whatsapp"));
+    }
+
+    #[test]
+    fn telegram_is_hot_reloadable() {
+        let hot = crate::config::ChannelsConfig::hot_reloadable_channel_names();
+        assert!(hot.contains(&"telegram"));
+        assert!(hot.contains(&"mattermost"));
     }
 }

@@ -6031,6 +6031,26 @@ impl ChannelsConfig {
         ));
         ret
     }
+
+    /// Channel names verified safe for hot-reload via PUT /api/config.
+    /// To add hot-reload support for a new channel, add its name here.
+    pub fn hot_reloadable_channel_names() -> &'static [&'static str] {
+        &[
+            "telegram", "discord", "slack", "mattermost",
+            "feishu", "dingtalk", "wecom", "irc",
+            "nextcloud_talk", "qq", "email", "reddit",
+            "bluesky", "twitter", "mochat", "wati", "linq",
+            "gmail_push", "clawdtalk", "imessage",
+            // Not yet:
+            // - matrix: auth state requires manual re-auth
+            // - signal: daemon process, external lifecycle
+            // - whatsapp: session persistence across restarts
+            // - nostr: feature-gated (channel-nostr)
+            // - discord_history: logger, not interactive
+            // - voice_wake: feature-gated (voice-wake), hardware-tied
+            // - lark: legacy alias for feishu, handled by feishu runtime
+        ]
+    }
 }
 
 fn default_channel_message_timeout_secs() -> u64 {
