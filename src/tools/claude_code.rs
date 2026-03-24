@@ -1,6 +1,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::ClaudeCodeConfig;
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -23,12 +24,12 @@ const SAFE_ENV_VARS: &[&str] = &[
 /// by default. No API key is needed unless `env_passthrough` includes
 /// `ANTHROPIC_API_KEY` for API-key billing.
 pub struct ClaudeCodeTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     config: ClaudeCodeConfig,
 }
 
 impl ClaudeCodeTool {
-    pub fn new(security: Arc<SecurityPolicy>, config: ClaudeCodeConfig) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, config: ClaudeCodeConfig) -> Self {
         Self { security, config }
     }
 }
@@ -79,7 +80,7 @@ impl Tool for ClaudeCodeTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Rate limit check
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -89,7 +90,7 @@ impl Tool for ClaudeCodeTool {
 
         // Enforce act policy
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "claude_code")
         {
             return Ok(ToolResult {
@@ -132,7 +133,7 @@ impl Tool for ClaudeCodeTool {
         // specially-crafted path components).
         let work_dir = if let Some(wd) = args.get("working_directory").and_then(|v| v.as_str()) {
             let wd_path = std::path::PathBuf::from(wd);
-            let workspace = &self.security.workspace_dir;
+            let workspace = &self.security.load().workspace_dir;
             let canonical_wd = match wd_path.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
@@ -172,11 +173,11 @@ impl Tool for ClaudeCodeTool {
             }
             canonical_wd
         } else {
-            self.security.workspace_dir.clone()
+            self.security.load().workspace_dir.clone()
         };
 
         // Record action budget
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -336,12 +337,12 @@ mod tests {
         ClaudeCodeConfig::default()
     }
 
-    fn test_security(autonomy: AutonomyLevel) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(autonomy: AutonomyLevel) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]
@@ -369,12 +370,12 @@ mod tests {
 
     #[tokio::test]
     async fn claude_code_blocks_rate_limited() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             max_actions_per_hour: 0,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = ClaudeCodeTool::new(security, test_config());
         let result = tool
             .execute(json!({"prompt": "hello"}))

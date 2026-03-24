@@ -1,6 +1,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::GoogleWorkspaceAllowedOperation;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use crate::config::DEFAULT_GWS_SERVICES;
 /// Google Workspace services (Drive, Gmail, Calendar, Sheets, etc.).
 /// Requires `gws` to be installed and authenticated (`gws auth login`).
 pub struct GoogleWorkspaceTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     allowed_services: Vec<String>,
     allowed_operations: Vec<GoogleWorkspaceAllowedOperation>,
     credentials_path: Option<String>,
@@ -34,7 +35,7 @@ impl GoogleWorkspaceTool {
     ///
     /// If `allowed_services` is empty, the default service set is used.
     pub fn new(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         allowed_services: Vec<String>,
         allowed_operations: Vec<GoogleWorkspaceAllowedOperation>,
         credentials_path: Option<String>,
@@ -230,7 +231,7 @@ impl Tool for GoogleWorkspaceTool {
         };
 
         // Security checks
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -369,7 +370,7 @@ impl Tool for GoogleWorkspaceTool {
         cmd_args.extend(Self::build_pagination_args(page_all, page_limit));
 
         // Charge action budget only after all validation passes
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -467,12 +468,12 @@ mod tests {
     use super::*;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]
@@ -745,12 +746,12 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limited_returns_error() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             max_actions_per_hour: 0,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = GoogleWorkspaceTool::new(security, vec![], vec![], None, None, 60, 30, false);
         let result = tool
             .execute(json!({

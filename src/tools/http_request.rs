@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use std::time::Duration;
 /// HTTP request tool for API interactions.
 /// Supports GET, POST, PUT, DELETE methods with configurable security.
 pub struct HttpRequestTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     allowed_domains: Vec<String>,
     max_response_size: usize,
     timeout_secs: u64,
@@ -17,7 +18,7 @@ pub struct HttpRequestTool {
 
 impl HttpRequestTool {
     pub fn new(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         allowed_domains: Vec<String>,
         max_response_size: usize,
         timeout_secs: u64,
@@ -209,7 +210,7 @@ impl Tool for HttpRequestTool {
         let headers_val = args.get("headers").cloned().unwrap_or(json!({}));
         let body = args.get("body").and_then(|v| v.as_str());
 
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -217,7 +218,7 @@ impl Tool for HttpRequestTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -464,10 +465,10 @@ mod tests {
         allowed_domains: Vec<&str>,
         allow_private_hosts: bool,
     ) -> HttpRequestTool {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
+        }));
         HttpRequestTool::new(
             security,
             allowed_domains.into_iter().map(String::from).collect(),
@@ -580,7 +581,7 @@ mod tests {
 
     #[test]
     fn validate_requires_allowlist() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = HttpRequestTool::new(security, vec![], 1_000_000, 30, false);
         let err = tool
             .validate_url("https://example.com")
@@ -693,10 +694,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_blocks_readonly_mode() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = HttpRequestTool::new(security, vec!["example.com".into()], 1_000_000, 30, false);
         let result = tool
             .execute(json!({"url": "https://example.com"}))
@@ -708,10 +709,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_blocks_when_rate_limited() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = HttpRequestTool::new(security, vec!["example.com".into()], 1_000_000, 30, false);
         let result = tool
             .execute(json!({"url": "https://example.com"}))
@@ -731,7 +732,7 @@ mod tests {
     #[test]
     fn truncate_response_over_limit() {
         let tool = HttpRequestTool::new(
-            Arc::new(SecurityPolicy::default()),
+            Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())),
             vec!["example.com".into()],
             10,
             30,
@@ -746,7 +747,7 @@ mod tests {
     #[test]
     fn truncate_response_zero_means_unlimited() {
         let tool = HttpRequestTool::new(
-            Arc::new(SecurityPolicy::default()),
+            Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())),
             vec!["example.com".into()],
             0, // max_response_size = 0 means no limit
             30,
@@ -759,7 +760,7 @@ mod tests {
     #[test]
     fn truncate_response_nonzero_still_truncates() {
         let tool = HttpRequestTool::new(
-            Arc::new(SecurityPolicy::default()),
+            Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())),
             vec!["example.com".into()],
             5,
             30,

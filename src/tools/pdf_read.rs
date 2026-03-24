@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -19,11 +20,11 @@ const MAX_OUTPUT_CHARS: usize = 200_000;
 /// Without the feature the tool is still registered so the LLM receives a
 /// clear, actionable error rather than a missing-tool confusion.
 pub struct PdfReadTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl PdfReadTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { security }
     }
 }
@@ -75,7 +76,7 @@ impl Tool for PdfReadTool {
             })
             .unwrap_or(DEFAULT_MAX_CHARS);
 
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -83,7 +84,7 @@ impl Tool for PdfReadTool {
             });
         }
 
-        if !self.security.is_path_allowed(path) {
+        if !self.security.load().is_path_allowed(path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -92,7 +93,7 @@ impl Tool for PdfReadTool {
         }
 
         // Record action before canonicalization so path-probing still consumes budget.
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -100,7 +101,7 @@ impl Tool for PdfReadTool {
             });
         }
 
-        let full_path = self.security.resolve_tool_path(path);
+        let full_path = self.security.load().resolve_tool_path(path);
 
         let resolved_path = match tokio::fs::canonicalize(&full_path).await {
             Ok(p) => p,
@@ -113,12 +114,12 @@ impl Tool for PdfReadTool {
             }
         };
 
-        if !self.security.is_resolved_path_allowed(&resolved_path) {
+        if !self.security.load().is_resolved_path_allowed(&resolved_path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    self.security
+                    self.security.load()
                         .resolved_path_violation_message(&resolved_path),
                 ),
             });
@@ -234,24 +235,24 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use tempfile::TempDir;
 
-    fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(workspace: std::path::PathBuf) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn test_security_with_limit(
         workspace: std::path::PathBuf,
         max_actions: u32,
-    ) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    ) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             max_actions_per_hour: max_actions,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]

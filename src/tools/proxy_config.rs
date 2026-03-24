@@ -3,6 +3,7 @@ use crate::config::{
     runtime_proxy_config, set_runtime_proxy_config, Config, ProxyConfig, ProxyScope,
 };
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use crate::util::MaybeSet;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -11,11 +12,11 @@ use std::sync::Arc;
 
 pub struct ProxyConfigTool {
     config: Arc<Config>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl ProxyConfigTool {
-    pub fn new(config: Arc<Config>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(config: Arc<Config>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { config, security }
     }
 
@@ -39,7 +40,7 @@ impl ProxyConfigTool {
     }
 
     fn require_write_access(&self) -> Option<ToolResult> {
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -47,7 +48,7 @@ impl ProxyConfigTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -441,12 +442,12 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use tempfile::TempDir;
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     async fn test_config(tmp: &TempDir) -> Arc<Config> {

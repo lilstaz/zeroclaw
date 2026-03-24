@@ -8,6 +8,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::channels::traits::Channel;
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -21,14 +22,14 @@ pub type ChannelMapHandle = Arc<RwLock<HashMap<String, Arc<dyn Channel>>>>;
 /// Agent-callable tool for adding or removing emoji reactions on messages.
 pub struct ReactionTool {
     channels: ChannelMapHandle,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl ReactionTool {
     /// Create a new reaction tool with an empty channel map.
     /// Call [`populate`] or write to the returned [`ChannelMapHandle`] once channels
     /// are available.
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),
             security,
@@ -91,7 +92,7 @@ impl Tool for ReactionTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Security gate
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "reaction")
         {
             return Ok(ToolResult {
@@ -265,7 +266,7 @@ mod tests {
     }
 
     fn make_tool_with_channels(channels: Vec<(&str, Arc<dyn Channel>)>) -> ReactionTool {
-        let tool = ReactionTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = ReactionTool::new(Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())));
         let map: HashMap<String, Arc<dyn Channel>> = channels
             .into_iter()
             .map(|(name, ch)| (name.to_string(), ch))
@@ -276,7 +277,7 @@ mod tests {
 
     #[test]
     fn tool_metadata() {
-        let tool = ReactionTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = ReactionTool::new(Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())));
         assert_eq!(tool.name(), "reaction");
         assert!(!tool.description().is_empty());
         let schema = tool.parameters_schema();
@@ -433,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_channels_returns_not_initialized() {
-        let tool = ReactionTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = ReactionTool::new(Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())));
         // No channels populated
 
         let result = tool
@@ -498,7 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn channel_map_handle_allows_late_binding() {
-        let tool = ReactionTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = ReactionTool::new(Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())));
         let handle = tool.channel_map_handle();
 
         // Initially empty — tool reports not initialized
@@ -537,7 +538,7 @@ mod tests {
 
     #[test]
     fn spec_matches_metadata() {
-        let tool = ReactionTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = ReactionTool::new(Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())));
         let spec = tool.spec();
         assert_eq!(spec.name, "reaction");
         assert_eq!(spec.description, tool.description());

@@ -7,6 +7,7 @@
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use anyhow::Context;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -59,7 +60,7 @@ impl Default for ComputerUseConfig {
 
 /// Browser automation tool using pluggable backends.
 pub struct BrowserTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     allowed_domains: Vec<String>,
     session_name: Option<String>,
     backend: String,
@@ -198,7 +199,7 @@ pub enum BrowserAction {
 
 impl BrowserTool {
     pub fn new(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         allowed_domains: Vec<String>,
         session_name: Option<String>,
     ) -> Self {
@@ -216,7 +217,7 @@ impl BrowserTool {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_backend(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         allowed_domains: Vec<String>,
         session_name: Option<String>,
         backend: String,
@@ -1024,7 +1025,7 @@ impl Tool for BrowserTool {
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         // Security checks
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -1032,7 +1033,7 @@ impl Tool for BrowserTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -2271,7 +2272,7 @@ mod tests {
 
     #[test]
     fn validate_url_blocks_ipv6_ssrf() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new(security, vec!["*".into()], None);
         assert!(tool.validate_url("https://[::1]/").is_err());
         assert!(tool.validate_url("https://[::ffff:127.0.0.1]/").is_err());
@@ -2330,7 +2331,7 @@ mod tests {
 
     #[test]
     fn browser_tool_default_backend_is_agent_browser() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new(security, vec!["example.com".into()], None);
         assert_eq!(
             tool.configured_backend().unwrap(),
@@ -2340,7 +2341,7 @@ mod tests {
 
     #[test]
     fn browser_tool_accepts_auto_backend_config() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new_with_backend(
             security,
             vec!["example.com".into()],
@@ -2356,7 +2357,7 @@ mod tests {
 
     #[test]
     fn browser_tool_accepts_computer_use_backend_config() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new_with_backend(
             security,
             vec!["example.com".into()],
@@ -2375,7 +2376,7 @@ mod tests {
 
     #[test]
     fn computer_use_endpoint_rejects_public_http_by_default() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new_with_backend(
             security,
             vec!["example.com".into()],
@@ -2395,7 +2396,7 @@ mod tests {
 
     #[test]
     fn computer_use_endpoint_requires_https_for_public_remote() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new_with_backend(
             security,
             vec!["example.com".into()],
@@ -2416,7 +2417,7 @@ mod tests {
 
     #[test]
     fn computer_use_coordinate_validation_applies_limits() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new_with_backend(
             security,
             vec!["example.com".into()],
@@ -2445,14 +2446,14 @@ mod tests {
 
     #[test]
     fn browser_tool_name() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new(security, vec!["example.com".into()], None);
         assert_eq!(tool.name(), "browser");
     }
 
     #[test]
     fn browser_tool_validates_url() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new(security, vec!["example.com".into()], None);
 
         // Valid
@@ -2475,7 +2476,7 @@ mod tests {
 
     #[test]
     fn browser_tool_empty_allowlist_blocks() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserTool::new(security, vec![], None);
         assert!(tool.validate_url("https://example.com").is_err());
     }

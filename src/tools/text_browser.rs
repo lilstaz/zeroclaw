@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use std::time::Duration;
 /// (lynx, links, w3m). Ideal for headless/SSH environments where graphical
 /// browsers are unavailable.
 pub struct TextBrowserTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     preferred_browser: Option<String>,
     timeout_secs: u64,
     max_response_size: usize,
@@ -20,7 +21,7 @@ const SUPPORTED_BROWSERS: &[&str] = &["lynx", "links", "w3m"];
 
 impl TextBrowserTool {
     pub fn new(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         preferred_browser: Option<String>,
         timeout_secs: u64,
     ) -> Self {
@@ -174,7 +175,7 @@ impl Tool for TextBrowserTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?;
 
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -182,7 +183,7 @@ impl Tool for TextBrowserTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -277,10 +278,10 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
     fn test_tool() -> TextBrowserTool {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
+        }));
         TextBrowserTool::new(security, None, 30)
     }
 
@@ -351,7 +352,7 @@ mod tests {
 
     #[test]
     fn truncate_over_limit() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let mut tool = TextBrowserTool::new(security, None, 30);
         tool.max_response_size = 10;
         let text = "hello world this is long";
@@ -379,10 +380,10 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_readonly_mode() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = TextBrowserTool::new(security, None, 30);
         let result = tool
             .execute(json!({"url": "https://example.com"}))
@@ -394,10 +395,10 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_rate_limited() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = TextBrowserTool::new(security, None, 30);
         let result = tool
             .execute(json!({"url": "https://example.com"}))

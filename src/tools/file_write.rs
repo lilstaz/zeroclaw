@@ -1,16 +1,17 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
 /// Write file contents with path sandboxing
 pub struct FileWriteTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl FileWriteTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { security }
     }
 }
@@ -53,7 +54,7 @@ impl Tool for FileWriteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'content' parameter"))?;
 
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -61,7 +62,7 @@ impl Tool for FileWriteTool {
             });
         }
 
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -70,7 +71,7 @@ impl Tool for FileWriteTool {
         }
 
         // Security check: validate path is within workspace
-        if !self.security.is_path_allowed(path) {
+        if !self.security.load().is_path_allowed(path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -78,7 +79,7 @@ impl Tool for FileWriteTool {
             });
         }
 
-        let full_path = self.security.resolve_tool_path(path);
+        let full_path = self.security.load().resolve_tool_path(path);
 
         let Some(parent) = full_path.parent() else {
             return Ok(ToolResult {
@@ -103,12 +104,12 @@ impl Tool for FileWriteTool {
             }
         };
 
-        if !self.security.is_resolved_path_allowed(&resolved_parent) {
+        if !self.security.load().is_resolved_path_allowed(&resolved_parent) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    self.security
+                    self.security.load()
                         .resolved_path_violation_message(&resolved_parent),
                 ),
             });
@@ -124,12 +125,12 @@ impl Tool for FileWriteTool {
 
         let resolved_target = resolved_parent.join(file_name);
 
-        if self.security.is_runtime_config_path(&resolved_target) {
+        if self.security.load().is_runtime_config_path(&resolved_target) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    self.security
+                    self.security.load()
                         .runtime_config_violation_message(&resolved_target),
                 ),
             });
@@ -149,7 +150,7 @@ impl Tool for FileWriteTool {
             }
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -177,25 +178,25 @@ mod tests {
     use super::*;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(workspace: std::path::PathBuf) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn test_security_with(
         workspace: std::path::PathBuf,
         autonomy: AutonomyLevel,
         max_actions_per_hour: u32,
-    ) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    ) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy,
             workspace_dir: workspace,
             max_actions_per_hour,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]
@@ -549,14 +550,14 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&root).await;
         tokio::fs::create_dir_all(&workspace).await.unwrap();
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace.clone(),
             workspace_only: false,
             allowed_roots: vec![root.clone()],
             forbidden_paths: vec![],
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = FileWriteTool::new(security);
         let result = tool
             .execute(json!({

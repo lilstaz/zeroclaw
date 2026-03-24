@@ -5,6 +5,7 @@ use crate::config::{DelegateAgentConfig, DelegateToolConfig};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -53,7 +54,7 @@ pub enum BackgroundTaskStatus {
 /// and can be retrieved via `action: "check_result"`.
 pub struct DelegateTool {
     agents: Arc<HashMap<String, DelegateAgentConfig>>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     /// Global credential fallback (from config.api_key)
     fallback_credential: Option<String>,
     /// Provider runtime options inherited from root config.
@@ -76,7 +77,7 @@ impl DelegateTool {
     pub fn new(
         agents: HashMap<String, DelegateAgentConfig>,
         fallback_credential: Option<String>,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
     ) -> Self {
         Self::new_with_options(
             agents,
@@ -89,7 +90,7 @@ impl DelegateTool {
     pub fn new_with_options(
         agents: HashMap<String, DelegateAgentConfig>,
         fallback_credential: Option<String>,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         provider_runtime_options: providers::ProviderRuntimeOptions,
     ) -> Self {
         Self {
@@ -112,7 +113,7 @@ impl DelegateTool {
     pub fn with_depth(
         agents: HashMap<String, DelegateAgentConfig>,
         fallback_credential: Option<String>,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         depth: u32,
     ) -> Self {
         Self::with_depth_and_options(
@@ -127,7 +128,7 @@ impl DelegateTool {
     pub fn with_depth_and_options(
         agents: HashMap<String, DelegateAgentConfig>,
         fallback_credential: Option<String>,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         depth: u32,
         provider_runtime_options: providers::ProviderRuntimeOptions,
     ) -> Self {
@@ -396,7 +397,7 @@ impl DelegateTool {
         }
 
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "delegate")
         {
             return Ok(ToolResult {
@@ -1236,8 +1237,8 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use anyhow::anyhow;
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::default())
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()))
     }
 
     fn sample_agents() -> HashMap<String, DelegateAgentConfig> {
@@ -1600,10 +1601,10 @@ mod tests {
 
     #[tokio::test]
     async fn delegation_blocked_in_readonly_mode() {
-        let readonly = Arc::new(SecurityPolicy {
+        let readonly = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = DelegateTool::new(sample_agents(), None, readonly);
         let result = tool
             .execute(json!({"agent": "researcher", "prompt": "test"}))
@@ -1619,10 +1620,10 @@ mod tests {
 
     #[tokio::test]
     async fn delegation_blocked_when_rate_limited() {
-        let limited = Arc::new(SecurityPolicy {
+        let limited = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = DelegateTool::new(sample_agents(), None, limited);
         let result = tool
             .execute(json!({"agent": "researcher", "prompt": "test"}))

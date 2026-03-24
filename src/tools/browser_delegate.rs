@@ -11,6 +11,7 @@
 //! invocations.
 
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use crate::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use regex::Regex;
@@ -67,13 +68,13 @@ impl Default for BrowserDelegateConfig {
 
 /// Tool that delegates browser-based tasks to a browser-capable CLI subprocess.
 pub struct BrowserDelegateTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     config: BrowserDelegateConfig,
 }
 
 impl BrowserDelegateTool {
     /// Create a new `BrowserDelegateTool` with the given security policy and config.
-    pub fn new(security: Arc<SecurityPolicy>, config: BrowserDelegateConfig) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, config: BrowserDelegateConfig) -> Self {
         Self { security, config }
     }
 
@@ -218,14 +219,14 @@ impl Tool for BrowserDelegateTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Security gate
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some("browser_delegate tool is denied by security policy".into()),
             });
         }
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -411,7 +412,7 @@ mod tests {
     }
 
     fn test_tool(config: BrowserDelegateConfig) -> BrowserDelegateTool {
-        BrowserDelegateTool::new(Arc::new(SecurityPolicy::default()), config)
+        BrowserDelegateTool::new(Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())), config)
     }
 
     // ── Config defaults ─────────────────────────────────────────────

@@ -1,6 +1,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::runtime::RuntimeAdapter;
 use crate::security::traits::Sandbox;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -43,14 +44,14 @@ const SAFE_ENV_VARS: &[&str] = &[
 
 /// Shell command execution tool with sandboxing
 pub struct ShellTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     runtime: Arc<dyn RuntimeAdapter>,
     sandbox: Arc<dyn Sandbox>,
     timeout_secs: u64,
 }
 
 impl ShellTool {
-    pub fn new(security: Arc<SecurityPolicy>, runtime: Arc<dyn RuntimeAdapter>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, runtime: Arc<dyn RuntimeAdapter>) -> Self {
         Self {
             security,
             runtime,
@@ -60,7 +61,7 @@ impl ShellTool {
     }
 
     pub fn new_with_sandbox(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         runtime: Arc<dyn RuntimeAdapter>,
         sandbox: Arc<dyn Sandbox>,
     ) -> Self {
@@ -145,7 +146,7 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -153,7 +154,7 @@ impl Tool for ShellTool {
             });
         }
 
-        match self.security.validate_command_execution(command, approved) {
+        match self.security.load().validate_command_execution(command, approved) {
             Ok(_) => {}
             Err(reason) => {
                 return Ok(ToolResult {
@@ -164,7 +165,7 @@ impl Tool for ShellTool {
             }
         }
 
-        if let Some(path) = self.security.forbidden_path_argument(command) {
+        if let Some(path) = self.security.load().forbidden_path_argument(command) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -172,7 +173,7 @@ impl Tool for ShellTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -185,7 +186,7 @@ impl Tool for ShellTool {
         // (CWE-200), then re-add only safe, functional variables.
         let mut cmd = match self
             .runtime
-            .build_shell_command(command, &self.security.workspace_dir)
+            .build_shell_command(command, &self.security.load().workspace_dir)
         {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -206,7 +207,7 @@ impl Tool for ShellTool {
 
         cmd.env_clear();
 
-        for var in collect_allowed_shell_env_vars(&self.security) {
+        for var in collect_allowed_shell_env_vars(&self.security.load()) {
             if let Ok(val) = std::env::var(&var) {
                 cmd.env(&var, val);
             }
@@ -270,12 +271,12 @@ mod tests {
     use crate::runtime::{NativeRuntime, RuntimeAdapter};
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security(autonomy: AutonomyLevel) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(autonomy: AutonomyLevel) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn test_runtime() -> Arc<dyn RuntimeAdapter> {
@@ -445,23 +446,23 @@ mod tests {
             .contains("not allowed"));
     }
 
-    fn test_security_with_env_cmd() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security_with_env_cmd() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: std::env::temp_dir(),
             allowed_commands: vec!["env".into(), "echo".into()],
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
-    fn test_security_with_env_passthrough(vars: &[&str]) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security_with_env_passthrough(vars: &[&str]) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: std::env::temp_dir(),
             allowed_commands: vec!["env".into()],
             shell_env_passthrough: vars.iter().map(|v| (*v).to_string()).collect(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     /// RAII guard that restores an environment variable to its original state on drop,
@@ -581,12 +582,12 @@ mod tests {
 
     #[tokio::test]
     async fn shell_requires_approval_for_medium_risk_command() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             allowed_commands: vec!["touch".into()],
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        });
+        }));
 
         let tool = ShellTool::new(security.clone(), test_runtime());
         let denied = tool
@@ -669,12 +670,12 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_rate_limited() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             max_actions_per_hour: 0,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = ShellTool::new(security, test_runtime());
         let result = tool
             .execute(json!({"command": "echo test"}))
@@ -686,11 +687,11 @@ mod tests {
 
     #[tokio::test]
     async fn shell_handles_nonexistent_command() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = ShellTool::new(security, test_runtime());
         let result = tool
             .execute(json!({"command": "nonexistent_binary_xyz_12345"}))
@@ -711,12 +712,12 @@ mod tests {
 
     #[tokio::test]
     async fn shell_record_action_budget_exhaustion() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             max_actions_per_hour: 1,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = ShellTool::new(security, test_runtime());
 
         let r1 = tool

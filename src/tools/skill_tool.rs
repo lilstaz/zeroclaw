@@ -7,6 +7,7 @@
 
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ pub struct SkillShellTool {
     tool_description: String,
     command_template: String,
     args: HashMap<String, String>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl SkillShellTool {
@@ -34,7 +35,7 @@ impl SkillShellTool {
     pub fn new(
         skill_name: &str,
         tool: &crate::skills::SkillTool,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
     ) -> Self {
         Self {
             tool_name: format!("{}.{}", skill_name, tool.name),
@@ -100,7 +101,7 @@ impl Tool for SkillShellTool {
         let command = self.substitute_args(&args);
 
         // Rate limit check
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -110,7 +111,7 @@ impl Tool for SkillShellTool {
 
         // Security validation — always requires explicit approval (approved=true)
         // since skill tools are user-defined and should be treated as medium-risk.
-        match self.security.validate_command_execution(&command, true) {
+        match self.security.load().validate_command_execution(&command, true) {
             Ok(_) => {}
             Err(reason) => {
                 return Ok(ToolResult {
@@ -121,7 +122,7 @@ impl Tool for SkillShellTool {
             }
         }
 
-        if let Some(path) = self.security.forbidden_path_argument(&command) {
+        if let Some(path) = self.security.load().forbidden_path_argument(&command) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -129,7 +130,7 @@ impl Tool for SkillShellTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -140,7 +141,7 @@ impl Tool for SkillShellTool {
         // Build and execute the command
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(&command);
-        cmd.current_dir(&self.security.workspace_dir);
+        cmd.current_dir(&self.security.load().workspace_dir);
         cmd.env_clear();
 
         // Only pass safe environment variables
@@ -209,12 +210,12 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use crate::skills::SkillTool;
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn sample_skill_tool() -> SkillTool {

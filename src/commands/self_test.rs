@@ -163,9 +163,11 @@ fn check_provider_registry() -> CheckResult {
 }
 
 fn check_tool_registry(config: &crate::config::Config) -> CheckResult {
-    let security = std::sync::Arc::new(crate::security::SecurityPolicy::from_config(
-        &config.autonomy,
-        &config.workspace_dir,
+    let security = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        crate::security::SecurityPolicy::from_config(
+            &config.autonomy,
+            &config.workspace_dir,
+        ),
     ));
     let tools = crate::tools::default_tools(security);
     if tools.is_empty() {

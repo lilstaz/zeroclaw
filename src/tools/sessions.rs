@@ -8,6 +8,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::channels::session_backend::SessionBackend;
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -107,11 +108,11 @@ impl Tool for SessionsListTool {
 /// Reads the message history of a specific session by ID.
 pub struct SessionsHistoryTool {
     backend: Arc<dyn SessionBackend>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl SessionsHistoryTool {
-    pub fn new(backend: Arc<dyn SessionBackend>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(backend: Arc<dyn SessionBackend>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { backend, security }
     }
 }
@@ -145,7 +146,7 @@ impl Tool for SessionsHistoryTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Read, "sessions_history")
         {
             return Ok(ToolResult {
@@ -207,11 +208,11 @@ impl Tool for SessionsHistoryTool {
 /// Sends a message to a specific session, enabling inter-agent communication.
 pub struct SessionsSendTool {
     backend: Arc<dyn SessionBackend>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl SessionsSendTool {
-    pub fn new(backend: Arc<dyn SessionBackend>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(backend: Arc<dyn SessionBackend>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { backend, security }
     }
 }
@@ -245,7 +246,7 @@ impl Tool for SessionsSendTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "sessions_send")
         {
             return Ok(ToolResult {
@@ -301,8 +302,8 @@ mod tests {
     use crate::providers::traits::ChatMessage;
     use tempfile::TempDir;
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::default())
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()))
     }
 
     fn test_backend() -> (TempDir, Arc<dyn SessionBackend>) {

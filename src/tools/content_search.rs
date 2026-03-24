@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::process::Stdio;
@@ -14,18 +15,18 @@ const TIMEOUT_SECS: u64 = 30;
 /// Uses ripgrep (`rg`) when available, falling back to `grep -rn -E`.
 /// All searches are confined to the workspace directory by security policy.
 pub struct ContentSearchTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     has_rg: bool,
 }
 
 impl ContentSearchTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         let has_rg = which::which("rg").is_ok();
         Self { security, has_rg }
     }
 
     #[cfg(test)]
-    fn new_with_backend(security: Arc<SecurityPolicy>, has_rg: bool) -> Self {
+    fn new_with_backend(security: Arc<ArcSwap<SecurityPolicy>>, has_rg: bool) -> Self {
         Self { security, has_rg }
     }
 }
@@ -162,7 +163,7 @@ impl Tool for ContentSearchTool {
             .min(MAX_RESULTS);
 
         // --- Rate limit check ---
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -173,7 +174,7 @@ impl Tool for ContentSearchTool {
         // --- Path security checks ---
         // Reject absolute paths unless they fall under an explicit allowed root.
         if std::path::Path::new(search_path).is_absolute()
-            && !self.security.is_under_allowed_root(search_path)
+            && !self.security.load().is_under_allowed_root(search_path)
         {
             return Ok(ToolResult {
                 success: false,
@@ -190,7 +191,7 @@ impl Tool for ContentSearchTool {
             });
         }
 
-        if !self.security.is_path_allowed(search_path) {
+        if !self.security.load().is_path_allowed(search_path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -201,7 +202,7 @@ impl Tool for ContentSearchTool {
         }
 
         // Record action to consume rate limit budget
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -210,7 +211,7 @@ impl Tool for ContentSearchTool {
         }
 
         // --- Resolve search directory ---
-        let resolved_path = self.security.resolve_tool_path(search_path);
+        let resolved_path = self.security.load().resolve_tool_path(search_path);
 
         let resolved_canon = match std::fs::canonicalize(&resolved_path) {
             Ok(p) => p,
@@ -223,7 +224,7 @@ impl Tool for ContentSearchTool {
             }
         };
 
-        if !self.security.is_resolved_path_allowed(&resolved_canon) {
+        if !self.security.load().is_resolved_path_allowed(&resolved_canon) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -316,7 +317,7 @@ impl Tool for ContentSearchTool {
         let raw_stdout = String::from_utf8_lossy(&output.stdout);
 
         // --- Parse and format output ---
-        let workspace = &self.security.workspace_dir;
+        let workspace = &self.security.load().workspace_dir;
         let workspace_canon =
             std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.clone());
 
@@ -661,25 +662,25 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn test_security(workspace: PathBuf) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(workspace: PathBuf) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn test_security_with(
         workspace: PathBuf,
         autonomy: AutonomyLevel,
         max_actions_per_hour: u32,
-    ) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    ) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy,
             workspace_dir: workspace,
             max_actions_per_hour,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn create_test_files(dir: &TempDir) {

@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
@@ -9,12 +10,12 @@ const PUSHOVER_API_URL: &str = "https://api.pushover.net/1/messages.json";
 const PUSHOVER_REQUEST_TIMEOUT_SECS: u64 = 15;
 
 pub struct PushoverTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     workspace_dir: PathBuf,
 }
 
 impl PushoverTool {
-    pub fn new(security: Arc<SecurityPolicy>, workspace_dir: PathBuf) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, workspace_dir: PathBuf) -> Self {
         Self {
             security,
             workspace_dir,
@@ -112,7 +113,7 @@ impl Tool for PushoverTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -120,7 +121,7 @@ impl Tool for PushoverTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -221,13 +222,13 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn test_security(level: AutonomyLevel, max_actions_per_hour: u32) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(level: AutonomyLevel, max_actions_per_hour: u32) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: level,
             max_actions_per_hour,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]

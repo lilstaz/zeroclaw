@@ -1,6 +1,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::memory::{Memory, MemoryCategory};
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -9,11 +10,11 @@ use std::sync::Arc;
 /// Let the agent store memories — its own brain writes
 pub struct MemoryStoreTool {
     memory: Arc<dyn Memory>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl MemoryStoreTool {
-    pub fn new(memory: Arc<dyn Memory>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(memory: Arc<dyn Memory>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { memory, security }
     }
 }
@@ -68,7 +69,7 @@ impl Tool for MemoryStoreTool {
         };
 
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "memory_store")
         {
             return Ok(ToolResult {
@@ -100,8 +101,8 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use tempfile::TempDir;
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::default())
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()))
     }
 
     fn test_mem() -> (TempDir, Arc<dyn Memory>) {
@@ -183,10 +184,10 @@ mod tests {
     #[tokio::test]
     async fn store_blocked_in_readonly_mode() {
         let (_tmp, mem) = test_mem();
-        let readonly = Arc::new(SecurityPolicy {
+        let readonly = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = MemoryStoreTool::new(mem.clone(), readonly);
         let result = tool
             .execute(json!({"key": "lang", "content": "Prefers Rust"}))
@@ -204,10 +205,10 @@ mod tests {
     #[tokio::test]
     async fn store_blocked_when_rate_limited() {
         let (_tmp, mem) = test_mem();
-        let limited = Arc::new(SecurityPolicy {
+        let limited = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = MemoryStoreTool::new(mem.clone(), limited);
         let result = tool
             .execute(json!({"key": "lang", "content": "Prefers Rust"}))

@@ -2,22 +2,23 @@ use super::traits::{Tool, ToolResult};
 use crate::config::Config;
 use crate::cron;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
 pub struct CronRemoveTool {
     config: Arc<Config>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl CronRemoveTool {
-    pub fn new(config: Arc<Config>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(config: Arc<Config>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { config, security }
     }
 
     fn enforce_mutation_allowed(&self, action: &str) -> Option<ToolResult> {
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -27,7 +28,7 @@ impl CronRemoveTool {
             });
         }
 
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -35,7 +36,7 @@ impl CronRemoveTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -125,11 +126,11 @@ mod tests {
         Arc::new(config)
     }
 
-    fn test_security(cfg: &Config) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::from_config(
+    fn test_security(cfg: &Config) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &cfg.autonomy,
             &cfg.workspace_dir,
-        ))
+        )))
     }
 
     #[tokio::test]

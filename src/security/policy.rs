@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// How much autonomy the agent has
@@ -91,7 +92,7 @@ pub struct SecurityPolicy {
     pub require_approval_for_medium_risk: bool,
     pub block_high_risk_commands: bool,
     pub shell_env_passthrough: Vec<String>,
-    pub tracker: ActionTracker,
+    pub tracker: Arc<ActionTracker>,
 }
 
 /// Default allowed commands for Unix platforms.
@@ -223,7 +224,7 @@ impl Default for SecurityPolicy {
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             shell_env_passthrough: vec![],
-            tracker: ActionTracker::new(),
+            tracker: Arc::new(ActionTracker::new()),
         }
     }
 }
@@ -1384,7 +1385,7 @@ impl SecurityPolicy {
             require_approval_for_medium_risk: autonomy_config.require_approval_for_medium_risk,
             block_high_risk_commands: autonomy_config.block_high_risk_commands,
             shell_env_passthrough: autonomy_config.shell_env_passthrough.clone(),
-            tracker: ActionTracker::new(),
+            tracker: Arc::new(ActionTracker::new()),
         }
     }
 
@@ -3082,5 +3083,19 @@ mod tests {
             summary.contains("`/opt/tools`"),
             "should list allowed roots"
         );
+    }
+
+    #[test]
+    fn tracker_arc_is_shared_not_deep_copied() {
+        use std::sync::Arc;
+        let policy = SecurityPolicy::from_config(
+            &crate::config::AutonomyConfig::default(),
+            &std::path::PathBuf::from("/tmp"),
+        );
+        policy.tracker.record();
+        let cloned_tracker = policy.tracker.clone(); // Arc::clone
+        cloned_tracker.record();
+        // Both accesses go to the same underlying ActionTracker
+        assert_eq!(policy.tracker.count(), 2, "tracker clone should share state via Arc");
     }
 }

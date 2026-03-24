@@ -1,6 +1,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::memory::Memory;
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -9,11 +10,11 @@ use std::sync::Arc;
 /// Let the agent forget/delete a memory entry
 pub struct MemoryForgetTool {
     memory: Arc<dyn Memory>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl MemoryForgetTool {
-    pub fn new(memory: Arc<dyn Memory>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(memory: Arc<dyn Memory>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { memory, security }
     }
 }
@@ -48,7 +49,7 @@ impl Tool for MemoryForgetTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'key' parameter"))?;
 
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "memory_forget")
         {
             return Ok(ToolResult {
@@ -85,8 +86,8 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use tempfile::TempDir;
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::default())
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()))
     }
 
     fn test_mem() -> (TempDir, Arc<dyn Memory>) {
@@ -141,10 +142,10 @@ mod tests {
         mem.store("temp", "temporary", MemoryCategory::Conversation, None)
             .await
             .unwrap();
-        let readonly = Arc::new(SecurityPolicy {
+        let readonly = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = MemoryForgetTool::new(mem.clone(), readonly);
         let result = tool.execute(json!({"key": "temp"})).await.unwrap();
         assert!(!result.success);
@@ -162,10 +163,10 @@ mod tests {
         mem.store("temp", "temporary", MemoryCategory::Conversation, None)
             .await
             .unwrap();
-        let limited = Arc::new(SecurityPolicy {
+        let limited = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = MemoryForgetTool::new(mem.clone(), limited);
         let result = tool.execute(json!({"key": "temp"})).await.unwrap();
         assert!(!result.success);

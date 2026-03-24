@@ -2,6 +2,7 @@ use super::traits::{Tool, ToolResult};
 use crate::config::{DelegateAgentConfig, SwarmConfig, SwarmStrategy};
 use crate::providers::{self, Provider};
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -17,7 +18,7 @@ const SWARM_AGENT_TIMEOUT_SECS: u64 = 120;
 pub struct SwarmTool {
     swarms: Arc<HashMap<String, SwarmConfig>>,
     agents: Arc<HashMap<String, DelegateAgentConfig>>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     fallback_credential: Option<String>,
     provider_runtime_options: providers::ProviderRuntimeOptions,
 }
@@ -27,7 +28,7 @@ impl SwarmTool {
         swarms: HashMap<String, SwarmConfig>,
         agents: HashMap<String, DelegateAgentConfig>,
         fallback_credential: Option<String>,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         provider_runtime_options: providers::ProviderRuntimeOptions,
     ) -> Self {
         Self {
@@ -523,7 +524,7 @@ impl Tool for SwarmTool {
         }
 
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "swarm")
         {
             return Ok(ToolResult {
@@ -548,8 +549,8 @@ mod tests {
     use super::*;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::default())
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()))
     }
 
     fn sample_agents() -> HashMap<String, DelegateAgentConfig> {
@@ -825,10 +826,10 @@ mod tests {
 
     #[tokio::test]
     async fn swarm_blocked_in_readonly_mode() {
-        let readonly = Arc::new(SecurityPolicy {
+        let readonly = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
@@ -850,10 +851,10 @@ mod tests {
 
     #[tokio::test]
     async fn swarm_blocked_when_rate_limited() {
-        let limited = Arc::new(SecurityPolicy {
+        let limited = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),

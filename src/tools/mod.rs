@@ -199,7 +199,7 @@ pub use traits::Tool;
 pub use traits::{ToolResult, ToolSpec};
 pub use verifiable_intent::VerifiableIntentTool;
 pub use weather_tool::WeatherTool;
-pub use web_fetch::WebFetchTool;
+pub use web_fetch::{WebFetchDomainRules, WebFetchTool};
 pub use web_search_tool::WebSearchTool;
 pub use workspace_tool::WorkspaceTool;
 
@@ -207,6 +207,7 @@ use crate::config::{Config, DelegateAgentConfig};
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::{create_sandbox, SecurityPolicy};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -273,13 +274,13 @@ fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
 }
 
 /// Create the default tool registry
-pub fn default_tools(security: Arc<SecurityPolicy>) -> Vec<Box<dyn Tool>> {
+pub fn default_tools(security: Arc<ArcSwap<SecurityPolicy>>) -> Vec<Box<dyn Tool>> {
     default_tools_with_runtime(security, Arc::new(NativeRuntime::new()))
 }
 
 /// Create the default tool registry with explicit runtime adapter.
 pub fn default_tools_with_runtime(
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     runtime: Arc<dyn RuntimeAdapter>,
 ) -> Vec<Box<dyn Tool>> {
     vec![
@@ -300,7 +301,7 @@ pub fn default_tools_with_runtime(
 pub fn register_skill_tools(
     tools_registry: &mut Vec<Box<dyn Tool>>,
     skills: &[crate::skills::Skill],
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 ) {
     let skill_tools = crate::skills::skills_to_tools(skills, security);
     let existing_names: std::collections::HashSet<String> = tools_registry
@@ -327,7 +328,7 @@ pub fn register_skill_tools(
 )]
 pub fn all_tools(
     config: Arc<Config>,
-    security: &Arc<SecurityPolicy>,
+    security: &Arc<ArcSwap<SecurityPolicy>>,
     memory: Arc<dyn Memory>,
     composio_key: Option<&str>,
     composio_entity_id: Option<&str>,
@@ -372,7 +373,7 @@ pub fn all_tools(
 )]
 pub fn all_tools_with_runtime(
     config: Arc<Config>,
-    security: &Arc<SecurityPolicy>,
+    security: &Arc<ArcSwap<SecurityPolicy>>,
     runtime: Arc<dyn RuntimeAdapter>,
     memory: Arc<dyn Memory>,
     composio_key: Option<&str>,
@@ -543,10 +544,13 @@ pub fn all_tools_with_runtime(
     }
 
     if web_fetch_config.enabled {
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: web_fetch_config.allowed_domains.clone(),
+            blocked_domains: web_fetch_config.blocked_domains.clone(),
+        }));
         tool_arcs.push(Arc::new(WebFetchTool::new(
             security.clone(),
-            web_fetch_config.allowed_domains.clone(),
-            web_fetch_config.blocked_domains.clone(),
+            domain_rules,
             web_fetch_config.max_response_size,
             web_fetch_config.timeout_secs,
             web_fetch_config.firecrawl.clone(),
@@ -1039,7 +1043,7 @@ mod tests {
 
     #[test]
     fn default_tools_has_expected_count() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tools = default_tools(security);
         assert_eq!(tools.len(), 6);
     }
@@ -1047,7 +1051,7 @@ mod tests {
     #[test]
     fn all_tools_excludes_browser_when_disabled() {
         let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let mem_cfg = MemoryConfig {
             backend: "markdown".into(),
             ..MemoryConfig::default()
@@ -1090,7 +1094,7 @@ mod tests {
     #[test]
     fn all_tools_includes_browser_when_enabled() {
         let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let mem_cfg = MemoryConfig {
             backend: "markdown".into(),
             ..MemoryConfig::default()
@@ -1132,7 +1136,7 @@ mod tests {
 
     #[test]
     fn default_tools_names() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tools = default_tools(security);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"shell"));
@@ -1145,7 +1149,7 @@ mod tests {
 
     #[test]
     fn default_tools_all_have_descriptions() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tools = default_tools(security);
         for tool in &tools {
             assert!(
@@ -1158,7 +1162,7 @@ mod tests {
 
     #[test]
     fn default_tools_all_have_schemas() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tools = default_tools(security);
         for tool in &tools {
             let schema = tool.parameters_schema();
@@ -1177,7 +1181,7 @@ mod tests {
 
     #[test]
     fn tool_spec_generation() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tools = default_tools(security);
         for tool in &tools {
             let spec = tool.spec();
@@ -1230,7 +1234,7 @@ mod tests {
     #[test]
     fn all_tools_includes_delegate_when_agents_configured() {
         let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let mem_cfg = MemoryConfig {
             backend: "markdown".into(),
             ..MemoryConfig::default()
@@ -1283,7 +1287,7 @@ mod tests {
     #[test]
     fn all_tools_excludes_delegate_when_no_agents() {
         let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let mem_cfg = MemoryConfig {
             backend: "markdown".into(),
             ..MemoryConfig::default()
@@ -1317,7 +1321,7 @@ mod tests {
     #[test]
     fn all_tools_includes_read_skill_in_compact_mode() {
         let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let mem_cfg = MemoryConfig {
             backend: "markdown".into(),
             ..MemoryConfig::default()
@@ -1352,7 +1356,7 @@ mod tests {
     #[test]
     fn all_tools_excludes_read_skill_in_full_mode() {
         let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let mem_cfg = MemoryConfig {
             backend: "markdown".into(),
             ..MemoryConfig::default()

@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::{AutonomyLevel, SecurityPolicy};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -7,12 +8,12 @@ use std::sync::Arc;
 /// Git operations tool for structured repository management.
 /// Provides safe, parsed git operations with JSON output.
 pub struct GitOperationsTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     workspace_dir: std::path::PathBuf,
 }
 
 impl GitOperationsTool {
-    pub fn new(security: Arc<SecurityPolicy>, workspace_dir: std::path::PathBuf) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, workspace_dir: std::path::PathBuf) -> Self {
         Self {
             security,
             workspace_dir,
@@ -611,7 +612,7 @@ impl Tool for GitOperationsTool {
 
         // Check autonomy level for write operations
         if self.requires_write_access(operation) {
-            if !self.security.can_act() {
+            if !self.security.load().can_act() {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -621,7 +622,7 @@ impl Tool for GitOperationsTool {
                 });
             }
 
-            match self.security.autonomy {
+            match self.security.load().autonomy {
                 AutonomyLevel::ReadOnly => {
                     return Ok(ToolResult {
                         success: false,
@@ -634,7 +635,7 @@ impl Tool for GitOperationsTool {
         }
 
         // Record action for rate limiting
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -668,10 +669,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn test_tool(dir: &std::path::Path) -> GitOperationsTool {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
+        }));
         GitOperationsTool::new(security, dir.to_path_buf())
     }
 
@@ -795,10 +796,10 @@ mod tests {
             .output()
             .unwrap();
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = GitOperationsTool::new(security, tmp.path().to_path_buf());
 
         let result = tool
@@ -824,10 +825,10 @@ mod tests {
             .output()
             .unwrap();
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = GitOperationsTool::new(security, tmp.path().to_path_buf());
 
         let result = tool.execute(json!({"operation": "branch"})).await.unwrap();
@@ -842,10 +843,10 @@ mod tests {
     #[tokio::test]
     async fn allows_readonly_ops_in_readonly_mode() {
         let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = GitOperationsTool::new(security, tmp.path().to_path_buf());
 
         // This will fail because there's no git repo, but it shouldn't be blocked by autonomy

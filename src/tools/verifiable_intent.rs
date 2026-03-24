@@ -6,6 +6,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use crate::tools::traits::{Tool, ToolResult};
 use crate::verifiable_intent::error::ViError;
@@ -18,12 +19,12 @@ use crate::verifiable_intent::verification::{
 /// Tool for verifying Verifiable Intent credential chains and evaluating
 /// constraints against fulfillment data.
 pub struct VerifiableIntentTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     strictness: StrictnessMode,
 }
 
 impl VerifiableIntentTool {
-    pub fn new(security: Arc<SecurityPolicy>, strictness: StrictnessMode) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, strictness: StrictnessMode) -> Self {
         Self {
             security,
             strictness,
@@ -83,7 +84,7 @@ impl Tool for VerifiableIntentTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Read, "vi_verify")
         {
             return Ok(ToolResult {
@@ -203,7 +204,7 @@ mod tests {
     use crate::security::SecurityPolicy;
 
     fn test_tool() -> VerifiableIntentTool {
-        let policy = Arc::new(SecurityPolicy::default());
+        let policy = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         VerifiableIntentTool::new(policy, StrictnessMode::Strict)
     }
 

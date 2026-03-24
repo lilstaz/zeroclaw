@@ -1,17 +1,18 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
 /// Open approved HTTPS URLs in the system default browser (no scraping, no DOM automation).
 pub struct BrowserOpenTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     allowed_domains: Vec<String>,
 }
 
 impl BrowserOpenTool {
-    pub fn new(security: Arc<SecurityPolicy>, allowed_domains: Vec<String>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, allowed_domains: Vec<String>) -> Self {
         Self {
             security,
             allowed_domains: normalize_allowed_domains(allowed_domains),
@@ -82,7 +83,7 @@ impl Tool for BrowserOpenTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?;
 
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -90,7 +91,7 @@ impl Tool for BrowserOpenTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -362,10 +363,10 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
     fn test_tool(allowed_domains: Vec<&str>) -> BrowserOpenTool {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
+        }));
         BrowserOpenTool::new(
             security,
             allowed_domains.into_iter().map(String::from).collect(),
@@ -479,7 +480,7 @@ mod tests {
 
     #[test]
     fn validate_requires_allowlist() {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         let tool = BrowserOpenTool::new(security, vec![]);
         let err = tool
             .validate_url("https://example.com")
@@ -502,10 +503,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_blocks_readonly_mode() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = BrowserOpenTool::new(security, vec!["example.com".into()]);
         let result = tool
             .execute(json!({"url": "https://example.com"}))
@@ -517,10 +518,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_blocks_when_rate_limited() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = BrowserOpenTool::new(security, vec!["example.com".into()]);
         let result = tool
             .execute(json!({"url": "https://example.com"}))

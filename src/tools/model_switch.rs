@@ -2,17 +2,18 @@ use super::traits::{Tool, ToolResult};
 use crate::agent::loop_::get_model_switch_state;
 use crate::providers;
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
 pub struct ModelSwitchTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl ModelSwitchTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { security }
     }
 }
@@ -53,7 +54,7 @@ impl Tool for ModelSwitchTool {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("get");
 
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "model_switch")
         {
             return Ok(ToolResult {

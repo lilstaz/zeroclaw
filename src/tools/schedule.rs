@@ -2,6 +2,7 @@ use super::traits::{Tool, ToolResult};
 use crate::config::Config;
 use crate::cron;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -10,12 +11,12 @@ use std::sync::Arc;
 
 /// Tool that lets the agent manage recurring and one-shot scheduled tasks.
 pub struct ScheduleTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     config: Config,
 }
 
 impl ScheduleTool {
-    pub fn new(security: Arc<SecurityPolicy>, config: Config) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>, config: Config) -> Self {
         Self { security, config }
     }
 }
@@ -147,7 +148,7 @@ impl ScheduleTool {
             });
         }
 
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -157,7 +158,7 @@ impl ScheduleTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -438,7 +439,7 @@ mod tests {
     use crate::security::AutonomyLevel;
     use tempfile::TempDir;
 
-    async fn test_setup() -> (TempDir, Config, Arc<SecurityPolicy>) {
+    async fn test_setup() -> (TempDir, Config, Arc<ArcSwap<SecurityPolicy>>) {
         let tmp = TempDir::new().unwrap();
         let config = Config {
             workspace_dir: tmp.path().join("workspace"),
@@ -448,10 +449,10 @@ mod tests {
         tokio::fs::create_dir_all(&config.workspace_dir)
             .await
             .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
         (tmp, config, security)
     }
 
@@ -564,10 +565,10 @@ mod tests {
         tokio::fs::create_dir_all(&config.workspace_dir)
             .await
             .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
 
         let tool = ScheduleTool::new(security, config);
 
@@ -602,10 +603,10 @@ mod tests {
         tokio::fs::create_dir_all(&config.workspace_dir)
             .await
             .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
         let tool = ScheduleTool::new(security, config);
 
         let blocked = tool
@@ -644,10 +645,10 @@ mod tests {
         tokio::fs::create_dir_all(&config.workspace_dir)
             .await
             .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
         let tool = ScheduleTool::new(security, config);
 
         let create = tool
@@ -700,10 +701,10 @@ mod tests {
         };
         config.cron.enabled = false;
         std::fs::create_dir_all(&config.workspace_dir).unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
         let tool = ScheduleTool::new(security, config);
 
         let create = tool
@@ -734,10 +735,10 @@ mod tests {
         config.autonomy.level = AutonomyLevel::Supervised;
         config.autonomy.allowed_commands = vec!["echo".into()];
         std::fs::create_dir_all(&config.workspace_dir).unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
         let tool = ScheduleTool::new(security, config);
 
         let result = tool
@@ -768,10 +769,10 @@ mod tests {
         config.autonomy.level = AutonomyLevel::Supervised;
         config.autonomy.allowed_commands = vec!["touch".into()];
         std::fs::create_dir_all(&config.workspace_dir).unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
         let tool = ScheduleTool::new(security, config);
 
         let denied = tool

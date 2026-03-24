@@ -12,6 +12,7 @@ use crate::providers::{
 };
 use crate::runtime;
 use crate::security::{AutonomyLevel, SecurityPolicy};
+use arc_swap::ArcSwap;
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
@@ -3590,10 +3591,10 @@ pub async fn run(
     let observer: Arc<dyn Observer> = Arc::from(base_observer);
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
         Arc::from(runtime::create_runtime(&config.runtime)?);
-    let security = Arc::new(SecurityPolicy::from_config(
+    let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
         &config.autonomy,
         &config.workspace_dir,
-    ));
+    )));
 
     // ── Memory (the brain) ────────────────────────────────────────
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
@@ -4452,10 +4453,10 @@ pub async fn process_message(
         Arc::from(observability::create_observer(&config.observability));
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
         Arc::from(runtime::create_runtime(&config.runtime)?);
-    let security = Arc::new(SecurityPolicy::from_config(
+    let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
         &config.autonomy,
         &config.workspace_dir,
-    ));
+    )));
     let approval_manager = ApprovalManager::for_non_interactive(&config.autonomy);
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
         &config.memory,
@@ -6048,11 +6049,11 @@ mod tests {
         ]);
 
         let tmp = TempDir::new().expect("temp dir");
-        let security = Arc::new(crate::security::SecurityPolicy {
+        let security = Arc::new(arc_swap::ArcSwap::from_pointee(crate::security::SecurityPolicy {
             autonomy: crate::security::AutonomyLevel::Supervised,
             workspace_dir: tmp.path().to_path_buf(),
             ..crate::security::SecurityPolicy::default()
-        });
+        }));
         let runtime: Arc<dyn crate::runtime::RuntimeAdapter> =
             Arc::new(crate::runtime::NativeRuntime::new());
         let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(
@@ -7035,10 +7036,10 @@ Tail"#;
     #[test]
     fn build_tool_instructions_includes_all_tools() {
         use crate::security::SecurityPolicy;
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &crate::config::AutonomyConfig::default(),
             std::path::Path::new("/tmp"),
-        ));
+        )));
         let tools = tools::default_tools(security);
         let instructions = build_tool_instructions(&tools, None);
 
@@ -7052,10 +7053,10 @@ Tail"#;
     #[test]
     fn tools_to_openai_format_produces_valid_schema() {
         use crate::security::SecurityPolicy;
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &crate::config::AutonomyConfig::default(),
             std::path::Path::new("/tmp"),
-        ));
+        )));
         let tools = tools::default_tools(security);
         let formatted = tools_to_openai_format(&tools);
 

@@ -1,11 +1,19 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::schema::FirecrawlConfig;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Hot-reloadable domain rules for web_fetch.
+/// Updated atomically by the config watcher task.
+pub struct WebFetchDomainRules {
+    pub allowed_domains: Vec<String>,
+    pub blocked_domains: Vec<String>,
+}
 
 /// Minimum body length to consider a standard fetch successful.
 /// Bodies shorter than this are treated as JS-only pages that need Firecrawl.
@@ -21,9 +29,8 @@ const FIRECRAWL_MIN_BODY_LEN: usize = 100;
 /// - Sets a descriptive User-Agent
 /// - Falls back to Firecrawl API when standard fetch fails (if enabled)
 pub struct WebFetchTool {
-    security: Arc<SecurityPolicy>,
-    allowed_domains: Vec<String>,
-    blocked_domains: Vec<String>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
+    domain_rules: Arc<ArcSwap<WebFetchDomainRules>>,
     max_response_size: usize,
     timeout_secs: u64,
     firecrawl: FirecrawlConfig,
@@ -31,17 +38,15 @@ pub struct WebFetchTool {
 
 impl WebFetchTool {
     pub fn new(
-        security: Arc<SecurityPolicy>,
-        allowed_domains: Vec<String>,
-        blocked_domains: Vec<String>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
+        domain_rules: Arc<ArcSwap<WebFetchDomainRules>>,
         max_response_size: usize,
         timeout_secs: u64,
         firecrawl: FirecrawlConfig,
     ) -> Self {
         Self {
             security,
-            allowed_domains: normalize_allowed_domains(allowed_domains),
-            blocked_domains: normalize_allowed_domains(blocked_domains),
+            domain_rules,
             max_response_size,
             timeout_secs,
             firecrawl,
@@ -49,10 +54,11 @@ impl WebFetchTool {
     }
 
     fn validate_url(&self, raw_url: &str) -> anyhow::Result<String> {
+        let rules = self.domain_rules.load();
         validate_target_url(
             raw_url,
-            &self.allowed_domains,
-            &self.blocked_domains,
+            &rules.allowed_domains,
+            &rules.blocked_domains,
             "web_fetch",
         )
     }
@@ -289,7 +295,7 @@ impl Tool for WebFetchTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?;
 
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -297,7 +303,7 @@ impl Tool for WebFetchTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -324,8 +330,9 @@ impl Tool for WebFetchTool {
             self.timeout_secs
         };
 
-        let allowed_domains = self.allowed_domains.clone();
-        let blocked_domains = self.blocked_domains.clone();
+        let rules = self.domain_rules.load();
+        let allowed = rules.allowed_domains.clone();
+        let blocked = rules.blocked_domains.clone();
         let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
@@ -333,8 +340,8 @@ impl Tool for WebFetchTool {
 
             if let Err(err) = validate_target_url(
                 attempt.url().as_str(),
-                &allowed_domains,
-                &blocked_domains,
+                &allowed,
+                &blocked,
                 "web_fetch",
             ) {
                 return attempt.error(std::io::Error::new(
@@ -648,26 +655,31 @@ mod tests {
         allowed_domains: Vec<&str>,
         blocked_domains: Vec<&str>,
     ) -> WebFetchTool {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
-        WebFetchTool::new(
-            security,
-            allowed_domains.into_iter().map(String::from).collect(),
-            blocked_domains.into_iter().map(String::from).collect(),
-            500_000,
-            30,
-            FirecrawlConfig::default(),
-        )
+        }));
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: normalize_allowed_domains(
+                allowed_domains.into_iter().map(String::from).collect(),
+            ),
+            blocked_domains: normalize_allowed_domains(
+                blocked_domains.into_iter().map(String::from).collect(),
+            ),
+        }));
+        WebFetchTool::new(security, domain_rules, 500_000, 30, FirecrawlConfig::default())
     }
 
     fn test_tool_with_firecrawl(firecrawl: FirecrawlConfig) -> WebFetchTool {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
-        WebFetchTool::new(security, vec!["*".into()], vec![], 500_000, 30, firecrawl)
+        }));
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: normalize_allowed_domains(vec!["*".to_string()]),
+            blocked_domains: vec![],
+        }));
+        WebFetchTool::new(security, domain_rules, 500_000, 30, firecrawl)
     }
 
     // ── Name and schema ──────────────────────────────────────────
@@ -757,15 +769,12 @@ mod tests {
 
     #[test]
     fn validate_requires_allowlist() {
-        let security = Arc::new(SecurityPolicy::default());
-        let tool = WebFetchTool::new(
-            security,
-            vec![],
-            vec![],
-            500_000,
-            30,
-            FirecrawlConfig::default(),
-        );
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: vec![],
+            blocked_domains: vec![],
+        }));
+        let tool = WebFetchTool::new(security, domain_rules, 500_000, 30, FirecrawlConfig::default());
         let err = tool
             .validate_url("https://example.com")
             .unwrap_err()
@@ -855,18 +864,15 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_readonly_mode() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
-        let tool = WebFetchTool::new(
-            security,
-            vec!["example.com".into()],
-            vec![],
-            500_000,
-            30,
-            FirecrawlConfig::default(),
-        );
+        }));
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: vec!["example.com".into()],
+            blocked_domains: vec![],
+        }));
+        let tool = WebFetchTool::new(security, domain_rules, 500_000, 30, FirecrawlConfig::default());
         let result = tool
             .execute(json!({"url": "https://example.com"}))
             .await
@@ -877,18 +883,15 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_rate_limited() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
-        let tool = WebFetchTool::new(
-            security,
-            vec!["example.com".into()],
-            vec![],
-            500_000,
-            30,
-            FirecrawlConfig::default(),
-        );
+        }));
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: vec!["example.com".into()],
+            blocked_domains: vec![],
+        }));
+        let tool = WebFetchTool::new(security, domain_rules, 500_000, 30, FirecrawlConfig::default());
         let result = tool
             .execute(json!({"url": "https://example.com"}))
             .await
@@ -909,9 +912,11 @@ mod tests {
     #[test]
     fn truncate_over_limit() {
         let tool = WebFetchTool::new(
-            Arc::new(SecurityPolicy::default()),
-            vec!["example.com".into()],
-            vec![],
+            Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())),
+            Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+                allowed_domains: vec!["example.com".into()],
+                blocked_domains: vec![],
+            })),
             10,
             30,
             FirecrawlConfig::default(),
@@ -1259,14 +1264,17 @@ mod tests {
         // Ensure Firecrawl API key env is missing so fallback also fails
         std::env::remove_var("FIRECRAWL_DOUBLE_FAIL_KEY");
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
+        }));
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: normalize_allowed_domains(vec!["*".to_string()]),
+            blocked_domains: vec![],
+        }));
         let tool = WebFetchTool::new(
             security,
-            vec!["*".into()],
-            vec![],
+            domain_rules,
             500_000,
             30,
             FirecrawlConfig {
@@ -1344,16 +1352,19 @@ mod tests {
         // Set up API key env var for this test
         std::env::set_var("FIRECRAWL_E2E_TEST_KEY", "test-key-12345");
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
+        }));
         let standard_addr = standard_server.address();
         let firecrawl_addr = firecrawl_server.address();
+        let domain_rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: normalize_allowed_domains(vec!["*".to_string()]),
+            blocked_domains: vec![],
+        }));
         let tool = WebFetchTool::new(
             security,
-            vec!["*".into()],
-            vec![],
+            domain_rules,
             500_000,
             30,
             FirecrawlConfig {
@@ -1389,5 +1400,25 @@ mod tests {
 
         // Clean up env var
         std::env::remove_var("FIRECRAWL_E2E_TEST_KEY");
+
+    #[test]
+    fn domain_rules_swap_takes_effect() {
+        let rules = Arc::new(ArcSwap::from_pointee(WebFetchDomainRules {
+            allowed_domains: vec!["example.com".to_string()],
+            blocked_domains: vec![],
+        }));
+
+        let loaded = rules.load();
+        assert!(loaded.allowed_domains.contains(&"example.com".to_string()));
+
+        rules.store(Arc::new(WebFetchDomainRules {
+            allowed_domains: vec!["newsite.com".to_string()],
+            blocked_domains: vec!["blocked.com".to_string()],
+        }));
+
+        let loaded = rules.load();
+        assert!(!loaded.allowed_domains.contains(&"example.com".to_string()));
+        assert!(loaded.allowed_domains.contains(&"newsite.com".to_string()));
+        assert!(loaded.blocked_domains.contains(&"blocked.com".to_string()));
     }
 }

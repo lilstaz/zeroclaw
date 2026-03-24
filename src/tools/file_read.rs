@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -8,11 +9,11 @@ const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Read file contents with path sandboxing
 pub struct FileReadTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl FileReadTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { security }
     }
 }
@@ -54,7 +55,7 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
 
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -63,7 +64,7 @@ impl Tool for FileReadTool {
         }
 
         // Security check: validate path is within workspace
-        if !self.security.is_path_allowed(path) {
+        if !self.security.load().is_path_allowed(path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -74,7 +75,7 @@ impl Tool for FileReadTool {
         // Record action BEFORE canonicalization so that every non-trivially-rejected
         // request consumes rate limit budget. This prevents attackers from probing
         // path existence (via canonicalize errors) without rate limit cost.
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -82,7 +83,7 @@ impl Tool for FileReadTool {
             });
         }
 
-        let full_path = self.security.resolve_tool_path(path);
+        let full_path = self.security.load().resolve_tool_path(path);
 
         // Resolve path before reading to block symlink escapes.
         let resolved_path = match tokio::fs::canonicalize(&full_path).await {
@@ -96,12 +97,12 @@ impl Tool for FileReadTool {
             }
         };
 
-        if !self.security.is_resolved_path_allowed(&resolved_path) {
+        if !self.security.load().is_resolved_path_allowed(&resolved_path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    self.security
+                    self.security.load()
                         .resolved_path_violation_message(&resolved_path),
                 ),
             });
@@ -238,25 +239,25 @@ mod tests {
     use super::*;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(workspace: std::path::PathBuf) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn test_security_with(
         workspace: std::path::PathBuf,
         autonomy: AutonomyLevel,
         max_actions_per_hour: u32,
-    ) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    ) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy,
             workspace_dir: workspace,
             max_actions_per_hour,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]
@@ -473,13 +474,13 @@ mod tests {
         tokio::fs::create_dir_all(&outside).await.unwrap();
         tokio::fs::write(&outside_file, "outside").await.unwrap();
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             workspace_only: false,
             forbidden_paths: vec![],
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = FileReadTool::new(security);
 
         let result = tool
@@ -785,11 +786,11 @@ mod tests {
             .expect("copy PDF fixture");
 
         // ── Build real FileReadTool ──
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace.clone(),
             ..SecurityPolicy::default()
-        });
+        }));
         let file_read_tool: Box<dyn Tool> = Box::new(FileReadTool::new(security));
 
         // ── Script provider: call file_read → then answer ──
@@ -880,11 +881,11 @@ mod tests {
             .await
             .unwrap();
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace.clone(),
             ..SecurityPolicy::default()
-        });
+        }));
         let file_read_tool: Box<dyn Tool> = Box::new(FileReadTool::new(security));
 
         let (provider, recorded) = RecordingProvider::new(vec![
@@ -978,11 +979,11 @@ mod tests {
             .expect("copy PDF fixture");
 
         // ── Build real FileReadTool ──
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace.clone(),
             ..SecurityPolicy::default()
-        });
+        }));
         let file_read_tool: Box<dyn Tool> = Box::new(FileReadTool::new(security));
 
         // ── Real provider (OpenAI Codex uses XML tool dispatch) ──
@@ -1048,13 +1049,13 @@ mod tests {
             .await
             .unwrap();
 
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace.clone(),
             workspace_only: true,
             allowed_roots: vec![allowed.clone()],
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = FileReadTool::new(security);
 
         // Absolute path under allowed_root should succeed

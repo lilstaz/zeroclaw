@@ -2,13 +2,14 @@ use super::linkedin_client::{ImageGenerator, LinkedInClient};
 use super::traits::{Tool, ToolResult};
 use crate::config::{LinkedInContentConfig, LinkedInImageConfig};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct LinkedInTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     workspace_dir: PathBuf,
     api_version: String,
     content_config: LinkedInContentConfig,
@@ -17,7 +18,7 @@ pub struct LinkedInTool {
 
 impl LinkedInTool {
     pub fn new(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         workspace_dir: PathBuf,
         api_version: String,
         content_config: LinkedInContentConfig,
@@ -165,7 +166,7 @@ impl Tool for LinkedInTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required 'action' parameter"))?;
 
         // Write actions require autonomy check
-        if Self::is_write_action(action) && !self.security.can_act() {
+        if Self::is_write_action(action) && !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -174,7 +175,7 @@ impl Tool for LinkedInTool {
         }
 
         // All actions are rate-limited
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -446,13 +447,13 @@ mod tests {
     use super::*;
     use crate::security::AutonomyLevel;
 
-    fn test_security(level: AutonomyLevel, max_actions_per_hour: u32) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(level: AutonomyLevel, max_actions_per_hour: u32) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: level,
             max_actions_per_hour,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn make_tool(level: AutonomyLevel, max_actions: u32) -> LinkedInTool {

@@ -2,6 +2,7 @@ use super::traits::{Tool, ToolResult};
 use crate::config::Config;
 use crate::cron::{self, JobType};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
@@ -9,11 +10,11 @@ use std::sync::Arc;
 
 pub struct CronRunTool {
     config: Arc<Config>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl CronRunTool {
-    pub fn new(config: Arc<Config>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(config: Arc<Config>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { config, security }
     }
 }
@@ -67,7 +68,7 @@ impl Tool for CronRunTool {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -75,7 +76,7 @@ impl Tool for CronRunTool {
             });
         }
 
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -96,7 +97,7 @@ impl Tool for CronRunTool {
 
         if matches!(job.job_type, JobType::Shell) {
             if let Err(reason) = self
-                .security
+                .security.load()
                 .validate_command_execution(&job.command, approved)
             {
                 return Ok(ToolResult {
@@ -107,7 +108,7 @@ impl Tool for CronRunTool {
             }
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -169,11 +170,11 @@ mod tests {
         Arc::new(config)
     }
 
-    fn test_security(cfg: &Config) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::from_config(
+    fn test_security(cfg: &Config) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &cfg.autonomy,
             &cfg.workspace_dir,
-        ))
+        )))
     }
 
     #[tokio::test]

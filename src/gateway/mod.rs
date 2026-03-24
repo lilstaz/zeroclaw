@@ -27,6 +27,7 @@ use crate::memory::{self, Memory, MemoryCategory};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
 use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use crate::tools;
 use crate::tools::canvas::CanvasStore;
@@ -424,10 +425,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     )?);
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
         Arc::from(runtime::create_runtime(&config.runtime)?);
-    let security = Arc::new(SecurityPolicy::from_config(
+    let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
         &config.autonomy,
         &config.workspace_dir,
-    ));
+    )));
 
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (

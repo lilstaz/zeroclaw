@@ -9,6 +9,7 @@ pub mod graph_client;
 pub mod types;
 
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use crate::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;
@@ -23,7 +24,7 @@ const DEFAULT_TOP: u32 = 25;
 
 pub struct Microsoft365Tool {
     config: types::Microsoft365ResolvedConfig,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     token_cache: Arc<auth::TokenCache>,
     http_client: reqwest::Client,
 }
@@ -31,7 +32,7 @@ pub struct Microsoft365Tool {
 impl Microsoft365Tool {
     pub fn new(
         config: types::Microsoft365ResolvedConfig,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         zeroclaw_dir: &std::path::Path,
     ) -> anyhow::Result<Self> {
         let http_client =
@@ -76,7 +77,7 @@ impl Microsoft365Tool {
     // ── Read actions ────────────────────────────────────────────────
 
     async fn handle_mail_list(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Read, "microsoft365.mail_list")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -99,7 +100,7 @@ impl Microsoft365Tool {
         &self,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Read, "microsoft365.teams_message_list")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -128,7 +129,7 @@ impl Microsoft365Tool {
         &self,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Read, "microsoft365.calendar_events_list")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -160,7 +161,7 @@ impl Microsoft365Tool {
     }
 
     async fn handle_onedrive_list(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Read, "microsoft365.onedrive_list")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -181,7 +182,7 @@ impl Microsoft365Tool {
         &self,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Read, "microsoft365.onedrive_download")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -222,7 +223,7 @@ impl Microsoft365Tool {
         &self,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Read, "microsoft365.sharepoint_search")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -245,7 +246,7 @@ impl Microsoft365Tool {
     // ── Write actions ───────────────────────────────────────────────
 
     async fn handle_mail_send(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Act, "microsoft365.mail_send")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -289,7 +290,7 @@ impl Microsoft365Tool {
         &self,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Act, "microsoft365.teams_message_send")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -318,7 +319,7 @@ impl Microsoft365Tool {
         &self,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Act, "microsoft365.calendar_event_create")
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -365,7 +366,7 @@ impl Microsoft365Tool {
         &self,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.security
+        self.security.load()
             .enforce_tool_operation(ToolOperation::Act, "microsoft365.calendar_event_delete")
             .map_err(|e| anyhow::anyhow!(e))?;
 

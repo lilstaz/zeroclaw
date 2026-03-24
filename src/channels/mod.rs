@@ -111,6 +111,7 @@ use crate::observability::traits::{ObserverEvent, ObserverMetric};
 use crate::observability::{self, runtime_trace, Observer};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
+use arc_swap::ArcSwap;
 use crate::security::{AutonomyLevel, SecurityPolicy};
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
@@ -342,6 +343,14 @@ struct ChannelCostTrackingState {
     prices: Arc<HashMap<String, crate::config::schema::ModelPricing>>,
 }
 
+/// Hot-reloadable channel runtime configuration.
+/// Updated atomically by the config watcher task.
+pub struct HotChannelConfig {
+    pub autonomy_level: AutonomyLevel,
+    pub non_cli_excluded_tools: Vec<String>,
+    pub approval_manager: Arc<ApprovalManager>,
+}
+
 #[derive(Clone)]
 struct ChannelRuntimeContext {
     channels_by_name: Arc<HashMap<String, Arc<dyn Channel>>>,
@@ -372,19 +381,13 @@ struct ChannelRuntimeContext {
     media_pipeline: crate::config::MediaPipelineConfig,
     transcription_config: crate::config::TranscriptionConfig,
     hooks: Option<Arc<crate::hooks::HookRunner>>,
-    non_cli_excluded_tools: Arc<Vec<String>>,
-    autonomy_level: AutonomyLevel,
+    hot: Arc<ArcSwap<HotChannelConfig>>,
     tool_call_dedup_exempt: Arc<Vec<String>>,
     model_routes: Arc<Vec<crate::config::ModelRouteConfig>>,
     query_classification: crate::config::QueryClassificationConfig,
     ack_reactions: bool,
     show_tool_calls: bool,
     session_store: Option<Arc<session_store::SessionStore>>,
-    /// Non-interactive approval manager for channel-driven runs.
-    /// Enforces `auto_approve` / `always_ask` / supervised policy from
-    /// `[autonomy]` config; auto-denies tools that would need interactive
-    /// approval since no operator is present on channel runs.
-    approval_manager: Arc<ApprovalManager>,
     activated_tools: Option<std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
     cost_tracking: Option<ChannelCostTrackingState>,
     pacing: crate::config::PacingConfig,
@@ -2696,6 +2699,7 @@ async fn process_channel_message(
     #[allow(clippy::cast_possible_truncation)]
     let elapsed_before_llm_ms = started_at.elapsed().as_millis() as u64;
     tracing::info!(elapsed_before_llm_ms, "⏱ Starting LLM call");
+    let hot = ctx.hot.load();
     let llm_result = loop {
         let loop_result = tokio::select! {
             () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
@@ -2712,7 +2716,7 @@ async fn process_channel_message(
                     route.model.as_str(),
                     runtime_defaults.temperature,
                     true,
-                    Some(&*ctx.approval_manager),
+                    Some(&*hot.approval_manager),
                     msg.channel.as_str(),
                     Some(msg.reply_target.as_str()),
                     &ctx.multimodal,
@@ -2721,11 +2725,11 @@ async fn process_channel_message(
                     delta_tx.clone(),
                     ctx.hooks.as_deref(),
                     if msg.channel == "cli"
-                        || ctx.autonomy_level == AutonomyLevel::Full
+                        || hot.autonomy_level == AutonomyLevel::Full
                     {
                         &[]
                     } else {
-                        ctx.non_cli_excluded_tools.as_ref()
+                        hot.non_cli_excluded_tools.as_ref()
                     },
                     ctx.tool_call_dedup_exempt.as_ref(),
                     ctx.activated_tools.as_ref(),
@@ -4605,10 +4609,10 @@ pub async fn start_channels(config: Config) -> Result<()> {
         Arc::from(observability::create_observer(&config.observability));
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
         Arc::from(runtime::create_runtime(&config.runtime)?);
-    let security = Arc::new(SecurityPolicy::from_config(
+    let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
         &config.autonomy,
         &config.workspace_dir,
-    ));
+    )));
     let model = resolved_default_model(&config);
     let temperature = config.default_temperature;
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
@@ -5022,8 +5026,11 @@ pub async fn start_channels(config: Config) -> Result<()> {
         } else {
             None
         },
-        non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
-        autonomy_level: config.autonomy.level,
+        hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+            autonomy_level: config.autonomy.level,
+            non_cli_excluded_tools: config.autonomy.non_cli_excluded_tools.clone(),
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
+        })),
         tool_call_dedup_exempt: Arc::new(config.agent.tool_call_dedup_exempt.clone()),
         model_routes: Arc::new(config.model_routes.clone()),
         query_classification: config.query_classification.clone(),
@@ -5043,7 +5050,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
         } else {
             None
         },
-        approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
         activated_tools: ch_activated_handle,
         cost_tracking: crate::cost::CostTracker::get_or_init_global(
             config.cost.clone(),
@@ -5416,17 +5422,19 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             prompt_config: Arc::new(crate::config::Config::default()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -5535,17 +5543,19 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             prompt_config: Arc::new(crate::config::Config::default()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -5610,17 +5620,19 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             prompt_config: Arc::new(crate::config::Config::default()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -5704,17 +5716,19 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             prompt_config: Arc::new(crate::config::Config::default()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: Some(Arc::clone(&store)),
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6244,8 +6258,13 @@ BTC is currently around $65,000 based on latest tool output."#
                 mattermost: false,
                 matrix: false,
             },
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             media_pipeline: crate::config::MediaPipelineConfig::default(),
@@ -6256,9 +6275,6 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6329,8 +6345,13 @@ BTC is currently around $65,000 based on latest tool output."#
                 mattermost: false,
                 matrix: false,
             },
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             media_pipeline: crate::config::MediaPipelineConfig::default(),
@@ -6341,9 +6362,6 @@ BTC is currently around $65,000 based on latest tool output."#
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6432,17 +6450,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6516,17 +6536,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6610,17 +6632,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6725,17 +6749,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6821,17 +6847,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -6932,17 +6960,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -7028,17 +7058,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig {
@@ -7117,17 +7149,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig {
@@ -7324,17 +7358,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -7431,17 +7467,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -7556,13 +7594,15 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             query_classification: crate::config::QueryClassificationConfig::default(),
@@ -7672,17 +7712,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -7773,17 +7815,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -7857,17 +7901,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -8638,17 +8684,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -8774,17 +8822,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -8951,17 +9001,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -9063,17 +9115,19 @@ BTC is currently around $65,000 based on latest tool output."#
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -9639,17 +9693,19 @@ This is an example JSON object for profile settings."#;
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -9730,17 +9786,19 @@ This is an example JSON object for profile settings."#;
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -9897,17 +9955,19 @@ This is an example JSON object for profile settings."#;
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(model_routes),
             query_classification: classification_config,
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -10012,17 +10072,19 @@ This is an example JSON object for profile settings."#;
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(model_routes),
             query_classification: classification_config,
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -10119,17 +10181,19 @@ This is an example JSON object for profile settings."#;
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(model_routes),
             query_classification: classification_config,
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -10246,17 +10310,19 @@ This is an example JSON object for profile settings."#;
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(model_routes),
             query_classification: classification_config,
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -10514,17 +10580,19 @@ This is an example JSON object for profile settings."#;
             media_pipeline: crate::config::MediaPipelineConfig::default(),
             transcription_config: crate::config::TranscriptionConfig::default(),
             hooks: None,
-            non_cli_excluded_tools: Arc::new(Vec::new()),
-            autonomy_level: AutonomyLevel::default(),
+            hot: Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+                autonomy_level: AutonomyLevel::default(),
+                non_cli_excluded_tools: Vec::new(),
+                approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+                    &crate::config::AutonomyConfig::default(),
+                )),
+            })),
             tool_call_dedup_exempt: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
             query_classification: crate::config::QueryClassificationConfig::default(),
             ack_reactions: true,
             show_tool_calls: true,
             session_store: None,
-            approval_manager: Arc::new(ApprovalManager::for_non_interactive(
-                &crate::config::AutonomyConfig::default(),
-            )),
             activated_tools: None,
             cost_tracking: None,
             pacing: crate::config::PacingConfig::default(),
@@ -10594,5 +10662,28 @@ This is an example JSON object for profile settings."#;
         let result = sanitize_channel_response(clean_text, &tools);
 
         assert_eq!(result, clean_text);
+    }
+
+    #[test]
+    fn hot_channel_config_atomic_swap() {
+        use crate::approval::ApprovalManager;
+        use crate::config::schema::AutonomyConfig;
+
+        let cfg = AutonomyConfig::default();
+        let hot = Arc::new(ArcSwap::from_pointee(HotChannelConfig {
+            autonomy_level: AutonomyLevel::Supervised,
+            non_cli_excluded_tools: vec!["old_tool".to_string()],
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(&cfg)),
+        }));
+
+        hot.store(Arc::new(HotChannelConfig {
+            autonomy_level: AutonomyLevel::Full,
+            non_cli_excluded_tools: vec!["new_tool".to_string()],
+            approval_manager: Arc::new(ApprovalManager::for_non_interactive(&cfg)),
+        }));
+
+        let loaded = hot.load();
+        assert_eq!(loaded.autonomy_level, AutonomyLevel::Full);
+        assert_eq!(loaded.non_cli_excluded_tools, vec!["new_tool".to_string()]);
     }
 }

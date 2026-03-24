@@ -10,6 +10,7 @@ use crate::observability::{self, Observer, ObserverEvent};
 use crate::providers::{self, ChatMessage, ChatRequest, ConversationMessage, Provider};
 use crate::runtime;
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use crate::tools::{self, Tool, ToolSpec};
 use anyhow::Result;
 use chrono::{Datelike, Timelike};
@@ -353,10 +354,10 @@ impl Agent {
             Arc::from(observability::create_observer(&config.observability));
         let runtime: Arc<dyn runtime::RuntimeAdapter> =
             Arc::from(runtime::create_runtime(&config.runtime)?);
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &config.autonomy,
             &config.workspace_dir,
-        ));
+        )));
 
         let memory: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
             &config.memory,
@@ -529,7 +530,7 @@ impl Agent {
             ))
             .skills_prompt_mode(config.skills.prompt_injection_mode)
             .auto_save(config.memory.auto_save)
-            .security_summary(Some(security.prompt_summary()))
+            .security_summary(Some(security.load().prompt_summary()))
             .autonomy_level(config.autonomy.level)
             .build()
     }

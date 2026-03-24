@@ -8,6 +8,7 @@
 
 use super::traits::{Tool, ToolResult};
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -36,7 +37,7 @@ fn ensure_https(url: &str) -> anyhow::Result<()> {
 pub struct ComposioTool {
     api_key: String,
     default_entity_id: String,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     recent_connected_accounts: RwLock<HashMap<String, String>>,
     action_slug_cache: RwLock<HashMap<String, String>>,
 }
@@ -45,7 +46,7 @@ impl ComposioTool {
     pub fn new(
         api_key: &str,
         default_entity_id: Option<&str>,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
     ) -> Self {
         Self {
             api_key: api_key.to_string(),
@@ -764,7 +765,7 @@ impl Tool for ComposioTool {
 
             "execute" => {
                 if let Err(error) = self
-                    .security
+                    .security.load()
                     .enforce_tool_operation(ToolOperation::Act, "composio.execute")
                 {
                     return Ok(ToolResult {
@@ -829,7 +830,7 @@ impl Tool for ComposioTool {
 
             "connect" => {
                 if let Err(error) = self
-                    .security
+                    .security.load()
                     .enforce_tool_operation(ToolOperation::Act, "composio.connect")
                 {
                     return Ok(ToolResult {
@@ -1332,8 +1333,8 @@ mod tests {
     use super::*;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::default())
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()))
     }
 
     // ── Constructor ───────────────────────────────────────────
@@ -1418,10 +1419,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_blocked_in_readonly_mode() {
-        let readonly = Arc::new(SecurityPolicy {
+        let readonly = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = ComposioTool::new("test-key", None, readonly);
         let result = tool
             .execute(json!({
@@ -1440,10 +1441,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_blocked_when_rate_limited() {
-        let limited = Arc::new(SecurityPolicy {
+        let limited = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             max_actions_per_hour: 0,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = ComposioTool::new("test-key", None, limited);
         let result = tool
             .execute(json!({

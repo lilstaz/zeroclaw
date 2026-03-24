@@ -818,7 +818,7 @@ pub fn skills_to_prompt_with_mode(
 /// only as XML in the system prompt.
 pub fn skills_to_tools(
     skills: &[Skill],
-    security: std::sync::Arc<crate::security::SecurityPolicy>,
+    security: std::sync::Arc<arc_swap::ArcSwap<crate::security::SecurityPolicy>>,
 ) -> Vec<Box<dyn crate::tools::traits::Tool>> {
     let mut tools: Vec<Box<dyn crate::tools::traits::Tool>> = Vec::new();
     for skill in skills {

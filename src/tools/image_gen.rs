@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 /// calls the fal.ai synchronous endpoint, downloads the resulting image,
 /// and saves it to `{workspace}/images/{filename}.png`.
 pub struct ImageGenTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     workspace_dir: PathBuf,
     default_model: String,
     api_key_env: String,
@@ -21,7 +22,7 @@ pub struct ImageGenTool {
 
 impl ImageGenTool {
     pub fn new(
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         workspace_dir: PathBuf,
         default_model: String,
         api_key_env: String,
@@ -271,7 +272,7 @@ impl Tool for ImageGenTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Security: image generation is a side-effecting action (HTTP + file write).
         if let Err(error) = self
-            .security
+            .security.load()
             .enforce_tool_operation(ToolOperation::Act, "image_gen")
         {
             return Ok(ToolResult {
@@ -290,12 +291,12 @@ mod tests {
     use super::*;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn test_tool() -> ImageGenTool {
@@ -413,11 +414,11 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_autonomy_blocks_execution() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = ImageGenTool::new(
             security,
             std::env::temp_dir(),

@@ -5,6 +5,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::workspace::WorkspaceManager;
 use crate::security::policy::ToolOperation;
+use arc_swap::ArcSwap;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -15,11 +16,11 @@ use tokio::sync::RwLock;
 /// Agent-callable tool for workspace management operations.
 pub struct WorkspaceTool {
     manager: Arc<RwLock<WorkspaceManager>>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl WorkspaceTool {
-    pub fn new(manager: Arc<RwLock<WorkspaceManager>>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(manager: Arc<RwLock<WorkspaceManager>>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { manager, security }
     }
 }
@@ -92,7 +93,7 @@ impl Tool for WorkspaceTool {
 
             "switch" => {
                 if let Err(error) = self
-                    .security
+                    .security.load()
                     .enforce_tool_operation(ToolOperation::Act, "workspace")
                 {
                     return Ok(ToolResult {
@@ -128,7 +129,7 @@ impl Tool for WorkspaceTool {
 
             "create" => {
                 if let Err(error) = self
-                    .security
+                    .security.load()
                     .enforce_tool_operation(ToolOperation::Act, "workspace")
                 {
                     return Ok(ToolResult {
@@ -264,7 +265,7 @@ mod tests {
         let mgr = WorkspaceManager::new(tmp.path().to_path_buf());
         WorkspaceTool::new(
             Arc::new(RwLock::new(mgr)),
-            Arc::new(SecurityPolicy::default()),
+            Arc::new(ArcSwap::from_pointee(SecurityPolicy::default())),
         )
     }
 

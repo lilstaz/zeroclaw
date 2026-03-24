@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -8,11 +9,11 @@ const MAX_RESULTS: usize = 1000;
 
 /// Search for files by glob pattern within the workspace.
 pub struct GlobSearchTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl GlobSearchTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { security }
     }
 }
@@ -49,7 +50,7 @@ impl Tool for GlobSearchTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' parameter"))?;
 
         // Rate limit check (fast path)
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -59,7 +60,7 @@ impl Tool for GlobSearchTool {
 
         // Security: reject absolute paths unless under an explicit allowed root.
         if (pattern.starts_with('/') || pattern.starts_with('\\'))
-            && !self.security.is_under_allowed_root(pattern)
+            && !self.security.load().is_under_allowed_root(pattern)
         {
             return Ok(ToolResult {
                 success: false,
@@ -78,7 +79,7 @@ impl Tool for GlobSearchTool {
         }
 
         // Record action to consume rate limit budget
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -89,7 +90,7 @@ impl Tool for GlobSearchTool {
         // Build full pattern: use resolve_tool_path to handle tilde expansion
         // and absolute paths correctly.
         let full_pattern = self
-            .security
+            .security.load()
             .resolve_tool_path(pattern)
             .to_string_lossy()
             .to_string();
@@ -105,7 +106,7 @@ impl Tool for GlobSearchTool {
             }
         };
 
-        let workspace = &self.security.workspace_dir;
+        let workspace = &self.security.load().workspace_dir;
         let workspace_canon = match std::fs::canonicalize(workspace) {
             Ok(p) => p,
             Err(e) => {
@@ -132,7 +133,7 @@ impl Tool for GlobSearchTool {
                 Err(_) => continue, // skip broken symlinks / unresolvable paths
             };
 
-            if !self.security.is_resolved_path_allowed(&resolved) {
+            if !self.security.load().is_resolved_path_allowed(&resolved) {
                 continue; // silently filter symlink escapes
             }
 
@@ -184,25 +185,25 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn test_security(workspace: PathBuf) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security(workspace: PathBuf) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     fn test_security_with(
         workspace: PathBuf,
         autonomy: AutonomyLevel,
         max_actions_per_hour: u32,
-    ) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    ) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy,
             workspace_dir: workspace,
             max_actions_per_hour,
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]

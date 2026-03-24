@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::fmt::Write;
@@ -15,11 +16,11 @@ const MAX_IMAGE_BYTES: u64 = 5_242_880;
 /// (file size, format, dimensions from header bytes) and provides base64
 /// data for future multimodal provider support.
 pub struct ImageInfoTool {
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl ImageInfoTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { security }
     }
 
@@ -159,7 +160,7 @@ impl Tool for ImageInfoTool {
         let path = Path::new(path_str);
 
         // Restrict reads to workspace directory to prevent arbitrary file exfiltration
-        if !self.security.is_path_allowed(path_str) {
+        if !self.security.load().is_path_allowed(path_str) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -233,14 +234,14 @@ mod tests {
     use super::*;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             workspace_dir: std::env::temp_dir(),
             workspace_only: false,
             forbidden_paths: vec![],
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     #[test]

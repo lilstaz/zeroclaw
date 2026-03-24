@@ -1,6 +1,7 @@
 use super::traits::{Tool, ToolResult};
 use crate::config::{ClassificationRule, Config, DelegateAgentConfig, ModelRouteConfig};
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use crate::util::MaybeSet;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -13,11 +14,11 @@ const DEFAULT_AGENT_MAX_ITERATIONS: usize = 10;
 
 pub struct ModelRoutingConfigTool {
     config: Arc<Config>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl ModelRoutingConfigTool {
-    pub fn new(config: Arc<Config>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(config: Arc<Config>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { config, security }
     }
 
@@ -41,7 +42,7 @@ impl ModelRoutingConfigTool {
     }
 
     fn require_write_access(&self) -> Option<ToolResult> {
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -49,7 +50,7 @@ impl ModelRoutingConfigTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -973,20 +974,20 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use tempfile::TempDir;
 
-    fn test_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn test_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
-    fn readonly_security() -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy {
+    fn readonly_security() -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
-        })
+        }))
     }
 
     async fn test_config(tmp: &TempDir) -> Arc<Config> {

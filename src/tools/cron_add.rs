@@ -4,22 +4,23 @@ use crate::cron::{
     self, deserialize_maybe_stringified, DeliveryConfig, JobType, Schedule, SessionTarget,
 };
 use crate::security::SecurityPolicy;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
 pub struct CronAddTool {
     config: Arc<Config>,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl CronAddTool {
-    pub fn new(config: Arc<Config>, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(config: Arc<Config>, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self { config, security }
     }
 
     fn enforce_mutation_allowed(&self, action: &str) -> Option<ToolResult> {
-        if !self.security.can_act() {
+        if !self.security.load().can_act() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -29,7 +30,7 @@ impl CronAddTool {
             });
         }
 
-        if self.security.is_rate_limited() {
+        if self.security.load().is_rate_limited() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -37,7 +38,7 @@ impl CronAddTool {
             });
         }
 
-        if !self.security.record_action() {
+        if !self.security.load().record_action() {
             return Some(ToolResult {
                 success: false,
                 output: String::new(),
@@ -262,7 +263,7 @@ impl Tool for CronAddTool {
                     }
                 };
 
-                if let Err(reason) = self.security.validate_command_execution(command, approved) {
+                if let Err(reason) = self.security.load().validate_command_execution(command, approved) {
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),
@@ -393,11 +394,11 @@ mod tests {
         Arc::new(config)
     }
 
-    fn test_security(cfg: &Config) -> Arc<SecurityPolicy> {
-        Arc::new(SecurityPolicy::from_config(
+    fn test_security(cfg: &Config) -> Arc<ArcSwap<SecurityPolicy>> {
+        Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &cfg.autonomy,
             &cfg.workspace_dir,
-        ))
+        )))
     }
 
     #[tokio::test]
@@ -749,10 +750,10 @@ mod tests {
             config_path: tmp.path().join("config.toml"),
             ..Config::default()
         });
-        let security = Arc::new(SecurityPolicy::from_config(
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::from_config(
             &cfg.autonomy,
             &cfg.workspace_dir,
-        ));
+        )));
         let tool = CronAddTool::new(cfg, security);
         let schema = tool.parameters_schema();
 

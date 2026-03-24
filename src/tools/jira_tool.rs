@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::{policy::ToolOperation, SecurityPolicy};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -33,7 +34,7 @@ pub struct JiraTool {
     api_token: String,
     allowed_actions: Vec<String>,
     http: Client,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
     timeout_secs: u64,
 }
 
@@ -43,7 +44,7 @@ impl JiraTool {
         email: String,
         api_token: String,
         allowed_actions: Vec<String>,
-        security: Arc<SecurityPolicy>,
+        security: Arc<ArcSwap<SecurityPolicy>>,
         timeout_secs: u64,
     ) -> Self {
         Self {
@@ -543,7 +544,7 @@ impl Tool for JiraTool {
             _ => unreachable!(),
         };
 
-        if let Err(error) = self.security.enforce_tool_operation(operation, "jira") {
+        if let Err(error) = self.security.load().enforce_tool_operation(operation, "jira") {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -958,10 +959,10 @@ mod tests {
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
     fn test_tool(allowed_actions: Vec<&str>) -> JiraTool {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             ..SecurityPolicy::default()
-        });
+        }));
         JiraTool::new(
             "https://test.atlassian.net".into(),
             "test@example.com".into(),
@@ -1078,10 +1079,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_comment_blocked_in_readonly_mode() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = JiraTool::new(
             "https://test.atlassian.net".into(),
             "test@example.com".into(),
@@ -1129,10 +1130,10 @@ mod tests {
         // myself is a Read operation — the security policy should not block it.
         // The call will fail at the HTTP level (no real server), not at the
         // policy level, so the error must NOT contain "read-only".
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = JiraTool::new(
             "https://test.atlassian.net".into(),
             "test@example.com".into(),
@@ -1398,10 +1399,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_list_projects_not_blocked_in_readonly_mode() {
-        let security = Arc::new(SecurityPolicy {
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
-        });
+        }));
         let tool = JiraTool::new(
             "https://127.0.0.1:1".into(),
             "test@example.com".into(),

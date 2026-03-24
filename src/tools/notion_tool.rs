@@ -1,5 +1,6 @@
 use super::traits::{Tool, ToolResult};
 use crate::security::{policy::ToolOperation, SecurityPolicy};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -16,12 +17,12 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 pub struct NotionTool {
     api_key: String,
     http: reqwest::Client,
-    security: Arc<SecurityPolicy>,
+    security: Arc<ArcSwap<SecurityPolicy>>,
 }
 
 impl NotionTool {
     /// Create a new Notion tool with the given API key and security policy.
-    pub fn new(api_key: String, security: Arc<SecurityPolicy>) -> Self {
+    pub fn new(api_key: String, security: Arc<ArcSwap<SecurityPolicy>>) -> Self {
         Self {
             api_key,
             http: reqwest::Client::new(),
@@ -236,7 +237,7 @@ impl Tool for NotionTool {
             }
         };
 
-        if let Err(error) = self.security.enforce_tool_operation(operation, "notion") {
+        if let Err(error) = self.security.load().enforce_tool_operation(operation, "notion") {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -337,7 +338,7 @@ mod tests {
     use crate::security::SecurityPolicy;
 
     fn test_tool() -> NotionTool {
-        let security = Arc::new(SecurityPolicy::default());
+        let security = Arc::new(ArcSwap::from_pointee(SecurityPolicy::default()));
         NotionTool::new("test-key".into(), security)
     }
 
