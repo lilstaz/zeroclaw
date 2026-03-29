@@ -199,10 +199,46 @@ pub async fn handle_api_config_put(
             .into_response();
     }
 
-    // Update in-memory config
+    // ── Hot-reload reconcile ──
+    let mut actions: Vec<&str> = vec![];
+
+    // Security policy hot-update
+    {
+        let current = state.config.lock();
+        if current.autonomy.allowed_commands != new_config.autonomy.allowed_commands
+            || current.autonomy.forbidden_paths != new_config.autonomy.forbidden_paths
+        {
+            state.security.hot_update_commands(
+                new_config.autonomy.allowed_commands.clone(),
+                new_config.autonomy.forbidden_paths.clone(),
+            );
+            actions.push("security-policy-updated");
+        }
+    }
+
+    // Channel config hot-reload
+    {
+        let current = state.config.lock();
+        if toml::to_string(&current.channels_config) != toml::to_string(&new_config.channels_config)
+        {
+            state.reloader.restart_channels(new_config.clone());
+            actions.push("channels-restarted");
+        }
+    }
+
+    // Update shared config
     *state.config.lock() = new_config;
 
-    Json(serde_json::json!({"status": "ok"})).into_response()
+    tracing::info!(actions = ?actions, "config hot-reload applied");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "actions": actions,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /api/tools — list registered tool specs
@@ -1611,6 +1647,10 @@ mod tests {
     }
 
     fn test_state(config: crate::config::Config) -> AppState {
+        let security = Arc::new(crate::security::SecurityPolicy::from_config(
+            &config.autonomy,
+            &config.workspace_dir,
+        ));
         AppState {
             config: Arc::new(Mutex::new(config)),
             provider: Arc::new(MockProvider),
@@ -1646,6 +1686,8 @@ mod tests {
             pending_pairings: None,
             path_prefix: String::new(),
             canvas_store: crate::tools::canvas::CanvasStore::new(),
+            security,
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         }
