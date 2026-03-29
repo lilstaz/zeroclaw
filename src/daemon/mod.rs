@@ -312,7 +312,10 @@ where
     })
 }
 
-async fn run_heartbeat_worker(config: Config, security: Arc<crate::security::SecurityPolicy>) -> Result<()> {
+async fn run_heartbeat_worker(
+    config: Config,
+    security: Arc<crate::security::SecurityPolicy>,
+) -> Result<()> {
     use crate::heartbeat::engine::{
         HeartbeatEngine, HeartbeatTask, TaskPriority, TaskStatus, compute_adaptive_interval,
     };
