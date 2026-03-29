@@ -453,7 +453,10 @@ mod tests {
         Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: std::env::temp_dir(),
-            allowed_commands: vec!["env".into(), "echo".into()],
+            allowed_commands: Arc::new(arc_swap::ArcSwap::from_pointee(vec![
+                "env".into(),
+                "echo".into(),
+            ])),
             ..SecurityPolicy::default()
         })
     }
@@ -462,7 +465,7 @@ mod tests {
         Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: std::env::temp_dir(),
-            allowed_commands: vec!["env".into()],
+            allowed_commands: Arc::new(arc_swap::ArcSwap::from_pointee(vec!["env".into()])),
             shell_env_passthrough: vars.iter().map(|v| (*v).to_string()).collect(),
             ..SecurityPolicy::default()
         })
@@ -594,7 +597,7 @@ mod tests {
     async fn shell_requires_approval_for_medium_risk_command() {
         let security = Arc::new(SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
-            allowed_commands: vec!["touch".into()],
+            allowed_commands: Arc::new(arc_swap::ArcSwap::from_pointee(vec!["touch".into()])),
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
         });

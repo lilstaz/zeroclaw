@@ -800,7 +800,7 @@ mod tests {
             workspace_dir: workspace.clone(),
             workspace_only: false,
             allowed_roots: vec![root.clone()],
-            forbidden_paths: vec![],
+            forbidden_paths: Arc::new(arc_swap::ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         });
         let tool = FileEditTool::new(security);

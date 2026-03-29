@@ -485,7 +485,7 @@ mod tests {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             workspace_only: false,
-            forbidden_paths: vec![],
+            forbidden_paths: Arc::new(arc_swap::ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         });
         let tool = FileReadTool::new(security);

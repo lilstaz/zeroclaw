@@ -238,7 +238,7 @@ mod tests {
             autonomy: AutonomyLevel::Full,
             workspace_dir: std::env::temp_dir(),
             workspace_only: false,
-            forbidden_paths: vec![],
+            forbidden_paths: Arc::new(arc_swap::ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         })
     }

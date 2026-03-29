@@ -1,8 +1,10 @@
+use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// How much autonomy the agent has
@@ -175,8 +177,8 @@ pub struct SecurityPolicy {
     pub autonomy: AutonomyLevel,
     pub workspace_dir: PathBuf,
     pub workspace_only: bool,
-    pub allowed_commands: Vec<String>,
-    pub forbidden_paths: Vec<String>,
+    pub(crate) allowed_commands: Arc<ArcSwap<Vec<String>>>,
+    pub(crate) forbidden_paths: Arc<ArcSwap<Vec<String>>>,
     pub allowed_roots: Vec<PathBuf>,
     pub max_actions_per_hour: u32,
     pub max_cost_per_day_cents: u32,
@@ -308,8 +310,8 @@ impl Default for SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: PathBuf::from("."),
             workspace_only: true,
-            allowed_commands: default_allowed_commands(),
-            forbidden_paths: default_forbidden_paths(),
+            allowed_commands: Arc::new(ArcSwap::from_pointee(default_allowed_commands())),
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(default_forbidden_paths())),
             allowed_roots: Vec::new(),
             max_actions_per_hour: 20,
             max_cost_per_day_cents: 500,
@@ -1015,7 +1017,7 @@ impl SecurityPolicy {
         // disabled `block_high_risk_commands`, they have opted out of all
         // command-level restrictions.  Short-circuit: skip the risk and
         // autonomy gates entirely.  See #4485.
-        let has_wildcard = self.allowed_commands.iter().any(|c| c.trim() == "*");
+        let has_wildcard = self.allowed_commands.load().iter().any(|c| c.trim() == "*");
         if has_wildcard && !self.block_high_risk_commands {
             return Ok(risk);
         }
@@ -1071,7 +1073,7 @@ impl SecurityPolicy {
                 continue;
             }
 
-            let explicitly_listed = self.allowed_commands.iter().any(|allowed| {
+            let explicitly_listed = self.allowed_commands.load().iter().any(|allowed| {
                 let allowed = strip_wrapping_quotes(allowed).trim();
                 // Skip wildcard — it does not count as an explicit entry.
                 if allowed.is_empty() || allowed == "*" {
@@ -1109,6 +1111,15 @@ impl SecurityPolicy {
     pub fn is_command_allowed(&self, command: &str) -> bool {
         if self.autonomy == AutonomyLevel::ReadOnly {
             return false;
+        }
+
+        // When the operator has set `allowed_commands = ["*"]` AND explicitly
+        // disabled `block_high_risk_commands`, they have opted out of all
+        // command-level restrictions including subshell/redirect guards.
+        let full_wildcard = self.allowed_commands.load().iter().any(|c| c.trim() == "*")
+            && !self.block_high_risk_commands;
+        if full_wildcard {
+            return true;
         }
 
         // Block subshell/expansion operators — these allow hiding arbitrary
@@ -1215,6 +1226,7 @@ impl SecurityPolicy {
 
             if !self
                 .allowed_commands
+                .load()
                 .iter()
                 .any(|allowed| is_allowlist_entry_match(allowed, executable, base_cmd))
             {
@@ -1386,7 +1398,7 @@ impl SecurityPolicy {
         }
 
         // Block forbidden paths using path-component-aware matching
-        for forbidden in &self.forbidden_paths {
+        for forbidden in self.forbidden_paths.load().iter() {
             let forbidden_path = expand_user_path(forbidden);
             if expanded_path.starts_with(forbidden_path) {
                 return false;
@@ -1421,7 +1433,7 @@ impl SecurityPolicy {
 
         // For paths outside workspace/allowlist, block forbidden roots to
         // prevent symlink escapes and sensitive directory access.
-        for forbidden in &self.forbidden_paths {
+        for forbidden in self.forbidden_paths.load().iter() {
             let forbidden_path = expand_user_path(forbidden);
             if resolved.starts_with(&forbidden_path) {
                 return false;
@@ -1586,8 +1598,12 @@ impl SecurityPolicy {
             autonomy: autonomy_config.level,
             workspace_dir: workspace_dir.to_path_buf(),
             workspace_only: autonomy_config.workspace_only,
-            allowed_commands: autonomy_config.allowed_commands.clone(),
-            forbidden_paths: autonomy_config.forbidden_paths.clone(),
+            allowed_commands: Arc::new(ArcSwap::from_pointee(
+                autonomy_config.allowed_commands.clone(),
+            )),
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(
+                autonomy_config.forbidden_paths.clone(),
+            )),
             allowed_roots: autonomy_config
                 .allowed_roots
                 .iter()
@@ -1608,6 +1624,13 @@ impl SecurityPolicy {
             shell_timeout_secs: autonomy_config.shell_timeout_secs,
             tracker: PerSenderTracker::new(),
         }
+    }
+
+    /// Hot-update command and path policies without rebuilding the policy.
+    /// Takes effect immediately for all active sessions sharing this instance.
+    pub fn hot_update_commands(&self, allowed: Vec<String>, forbidden: Vec<String>) {
+        self.allowed_commands.store(Arc::new(allowed));
+        self.forbidden_paths.store(Arc::new(forbidden));
     }
 
     /// Render a human-readable summary of the active security constraints
@@ -1644,9 +1667,10 @@ impl SecurityPolicy {
         }
 
         // Allowed commands
-        if !self.allowed_commands.is_empty() {
+        if !self.allowed_commands.load().is_empty() {
             let cmds: Vec<String> = self
                 .allowed_commands
+                .load()
                 .iter()
                 .map(|c| format!("`{c}`"))
                 .collect();
@@ -1659,9 +1683,10 @@ impl SecurityPolicy {
         }
 
         // Forbidden paths
-        if !self.forbidden_paths.is_empty() {
+        if !self.forbidden_paths.load().is_empty() {
             let paths: Vec<String> = self
                 .forbidden_paths
+                .load()
                 .iter()
                 .map(|p| format!("`{p}`"))
                 .collect();
@@ -1831,7 +1856,7 @@ mod tests {
     #[test]
     fn allowlist_supports_explicit_executable_paths() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["/usr/bin/antigravity".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["/usr/bin/antigravity".into()])),
             ..SecurityPolicy::default()
         };
 
@@ -1842,7 +1867,7 @@ mod tests {
     #[test]
     fn allowlist_supports_wildcard_entry() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["*".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["*".into()])),
             ..SecurityPolicy::default()
         };
 
@@ -1876,7 +1901,10 @@ mod tests {
     #[test]
     fn custom_allowlist() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["docker".into(), "kubectl".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec![
+                "docker".into(),
+                "kubectl".into(),
+            ])),
             ..SecurityPolicy::default()
         };
         assert!(p.is_command_allowed("docker ps"));
@@ -1888,7 +1916,7 @@ mod tests {
     #[test]
     fn empty_allowlist_blocks_everything() {
         let p = SecurityPolicy {
-            allowed_commands: vec![],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         };
         assert!(!p.is_command_allowed("ls"));
@@ -1905,7 +1933,7 @@ mod tests {
     #[test]
     fn command_risk_medium_for_mutating_commands() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["git".into(), "touch".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["git".into(), "touch".into()])),
             ..SecurityPolicy::default()
         };
         assert_eq!(
@@ -1921,7 +1949,7 @@ mod tests {
     #[test]
     fn command_risk_high_for_dangerous_commands() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["rm".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["rm".into()])),
             ..SecurityPolicy::default()
         };
         assert_eq!(
@@ -1935,7 +1963,7 @@ mod tests {
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
             require_approval_for_medium_risk: true,
-            allowed_commands: vec!["touch".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["touch".into()])),
             ..SecurityPolicy::default()
         };
 
@@ -1954,7 +1982,7 @@ mod tests {
         // count as an explicit allowlist entry.
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
-            allowed_commands: vec!["*".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["*".into()])),
             ..SecurityPolicy::default()
         };
 
@@ -1970,7 +1998,7 @@ mod tests {
         // a deliberate decision to permit it.
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Full,
-            allowed_commands: vec!["curl".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["curl".into()])),
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
@@ -1983,7 +2011,7 @@ mod tests {
     fn validate_command_allows_wget_when_explicitly_listed() {
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Full,
-            allowed_commands: vec!["wget".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["wget".into()])),
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
@@ -1998,7 +2026,7 @@ mod tests {
         // Allowing curl explicitly should not exempt wget.
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Full,
-            allowed_commands: vec!["curl".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["curl".into()])),
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
@@ -2013,7 +2041,7 @@ mod tests {
         // Operator explicitly listed "rm" — they accept the risk.
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Full,
-            allowed_commands: vec!["rm".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["rm".into()])),
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
@@ -2029,7 +2057,7 @@ mod tests {
         // from the block gate).
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
-            allowed_commands: vec!["curl".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["curl".into()])),
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
@@ -2048,7 +2076,7 @@ mod tests {
         // must be explicitly allowed for the exemption to apply.
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Full,
-            allowed_commands: vec!["curl".into(), "grep".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["curl".into(), "grep".into()])),
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
@@ -2062,7 +2090,7 @@ mod tests {
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Full,
             require_approval_for_medium_risk: true,
-            allowed_commands: vec!["touch".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["touch".into()])),
             ..SecurityPolicy::default()
         };
 
@@ -2140,7 +2168,7 @@ mod tests {
     fn absolute_paths_allowed_when_not_workspace_only() {
         let p = SecurityPolicy {
             workspace_only: false,
-            forbidden_paths: vec![],
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         };
         assert!(p.is_path_allowed("/tmp/file.txt"));
@@ -2185,15 +2213,21 @@ mod tests {
             require_approval_for_medium_risk: false,
             block_high_risk_commands: false,
             shell_env_passthrough: vec!["DATABASE_URL".into()],
-            ..crate::config::AutonomyConfig::default()
+            ..Default::default()
         };
         let workspace = PathBuf::from("/tmp/test-workspace");
         let policy = SecurityPolicy::from_config(&autonomy_config, &workspace);
 
         assert_eq!(policy.autonomy, AutonomyLevel::Full);
         assert!(!policy.workspace_only);
-        assert_eq!(policy.allowed_commands, vec!["docker"]);
-        assert_eq!(policy.forbidden_paths, vec!["/secret"]);
+        assert_eq!(
+            *policy.allowed_commands.load(),
+            Arc::new(vec!["docker".to_string()])
+        );
+        assert_eq!(
+            *policy.forbidden_paths.load(),
+            Arc::new(vec!["/secret".to_string()])
+        );
         assert_eq!(policy.max_actions_per_hour, 100);
         assert_eq!(policy.max_cost_per_day_cents, 1000);
         assert!(!policy.require_approval_for_medium_risk);
@@ -2236,8 +2270,8 @@ mod tests {
         let p = SecurityPolicy::default();
         assert_eq!(p.autonomy, AutonomyLevel::Supervised);
         assert!(p.workspace_only);
-        assert!(!p.allowed_commands.is_empty());
-        assert!(!p.forbidden_paths.is_empty());
+        assert!(!p.allowed_commands.load().is_empty());
+        assert!(!p.forbidden_paths.load().is_empty());
         assert!(p.max_actions_per_hour > 0);
         assert!(p.max_cost_per_day_cents > 0);
         assert!(p.require_approval_for_medium_risk);
@@ -2329,7 +2363,7 @@ mod tests {
     #[test]
     fn quoted_semicolons_do_not_split_sqlite_command() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["sqlite3".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["sqlite3".into()])),
             ..SecurityPolicy::default()
         };
         assert!(p.is_command_allowed(
@@ -2346,7 +2380,7 @@ mod tests {
     #[test]
     fn unquoted_semicolon_after_quoted_sql_still_splits_commands() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["sqlite3".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["sqlite3".into()])),
             ..SecurityPolicy::default()
         };
         assert!(!p.is_command_allowed("sqlite3 /tmp/test.db \"SELECT 1;\"; rm -rf /"));
@@ -2541,6 +2575,18 @@ mod tests {
     }
 
     #[test]
+    fn mixed_case_allowlist_entry_matches_command() {
+        let p = SecurityPolicy {
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["icalBuddy".into()])),
+            ..SecurityPolicy::default()
+        };
+        // Mixed-case allowlist entry should match the same command
+        assert!(p.is_command_allowed("icalBuddy"));
+        // Also match lowercase invocation (case-insensitive)
+        assert!(p.is_command_allowed("icalbuddy"));
+    }
+
+    #[test]
     fn forbidden_path_argument_detects_absolute_path() {
         let p = default_policy();
         assert_eq!(
@@ -2731,7 +2777,7 @@ mod tests {
     fn readonly_blocks_even_safe_commands() {
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::ReadOnly,
-            allowed_commands: vec!["ls".into(), "cat".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["ls".into(), "cat".into()])),
             ..SecurityPolicy::default()
         };
         assert!(!p.is_command_allowed("ls"));
@@ -2743,7 +2789,7 @@ mod tests {
     fn supervised_allows_listed_commands() {
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
-            allowed_commands: vec!["git".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["git".into()])),
             ..SecurityPolicy::default()
         };
         assert!(p.is_command_allowed("git status"));
@@ -2772,7 +2818,7 @@ mod tests {
         let p = SecurityPolicy {
             workspace_dir: canonical_workspace.clone(),
             workspace_only: false,
-            forbidden_paths: vec!["/etc".into(), "/var".into()],
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(vec!["/etc".into(), "/var".into()])),
             ..SecurityPolicy::default()
         };
 
@@ -2846,7 +2892,7 @@ mod tests {
             max_cost_per_day_cents: 100,
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
-            ..crate::config::AutonomyConfig::default()
+            ..Default::default()
         };
         let workspace = PathBuf::from("/tmp/test");
         let policy = SecurityPolicy::from_config(&autonomy_config, &workspace);
@@ -2956,14 +3002,14 @@ mod tests {
         // Must contain all critical system dirs
         for dir in ["/etc", "/root", "/proc", "/sys", "/dev", "/var", "/tmp"] {
             assert!(
-                p.forbidden_paths.iter().any(|f| f == dir),
+                p.forbidden_paths.load().iter().any(|f| f == dir),
                 "Default forbidden_paths must include {dir}"
             );
         }
         // Must contain sensitive dotfiles
         for dot in ["~/.ssh", "~/.gnupg", "~/.aws"] {
             assert!(
-                p.forbidden_paths.iter().any(|f| f == dot),
+                p.forbidden_paths.load().iter().any(|f| f == dot),
                 "Default forbidden_paths must include {dot}"
             );
         }
@@ -3277,7 +3323,7 @@ mod tests {
     #[test]
     fn prompt_summary_includes_allowed_commands() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["git".into(), "ls".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["git".into(), "ls".into()])),
             ..SecurityPolicy::default()
         };
         let summary = p.prompt_summary();
@@ -3293,7 +3339,7 @@ mod tests {
     fn prompt_summary_includes_forbidden_paths() {
         let p = SecurityPolicy {
             workspace_only: false,
-            forbidden_paths: vec!["/etc".into(), "~/.ssh".into()],
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(vec!["/etc".into(), "~/.ssh".into()])),
             ..SecurityPolicy::default()
         };
         let summary = p.prompt_summary();
@@ -3353,7 +3399,7 @@ mod tests {
     #[test]
     fn wildcard_with_block_high_risk_false_allows_everything() {
         let p = SecurityPolicy {
-            allowed_commands: vec!["*".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["*".into()])),
             block_high_risk_commands: false,
             workspace_only: false,
             ..SecurityPolicy::default()
@@ -3375,7 +3421,7 @@ mod tests {
         // should still block high-risk commands.
         let p = SecurityPolicy {
             autonomy: AutonomyLevel::Supervised,
-            allowed_commands: vec!["*".into()],
+            allowed_commands: Arc::new(ArcSwap::from_pointee(vec!["*".into()])),
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
         };
@@ -3411,5 +3457,37 @@ mod tests {
         let t = PerSenderTracker::new();
         // Key "ghost" has never been recorded — should not be exhausted at max=1
         assert!(!t.is_exhausted("ghost", 1));
+    }
+
+    #[test]
+    fn hot_update_commands_changes_visible_immediately() {
+        let config = crate::config::AutonomyConfig {
+            allowed_commands: vec!["ls".into()],
+            forbidden_paths: vec!["/etc/passwd".into()],
+            ..Default::default()
+        };
+        let policy = SecurityPolicy::from_config(&config, Path::new("/tmp"));
+
+        assert!(policy.is_command_allowed("ls"));
+        assert!(!policy.is_path_allowed("/etc/passwd"));
+
+        policy.hot_update_commands(vec!["cat".into()], vec!["/secret".into()]);
+
+        assert!(
+            !policy.is_command_allowed("ls"),
+            "old command should be removed"
+        );
+        assert!(
+            policy.is_command_allowed("cat"),
+            "new command should be allowed"
+        );
+        assert!(
+            policy.is_path_allowed("/etc/passwd"),
+            "old forbidden path should be unblocked"
+        );
+        assert!(
+            !policy.is_path_allowed("/secret"),
+            "new forbidden path should be blocked"
+        );
     }
 }
