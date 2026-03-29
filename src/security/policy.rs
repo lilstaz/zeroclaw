@@ -3464,6 +3464,7 @@ mod tests {
         let config = crate::config::AutonomyConfig {
             allowed_commands: vec!["ls".into()],
             forbidden_paths: vec!["/etc/passwd".into()],
+            workspace_only: false,
             ..Default::default()
         };
         let policy = SecurityPolicy::from_config(&config, Path::new("/tmp"));

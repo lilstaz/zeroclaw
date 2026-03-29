@@ -149,7 +149,7 @@ async fn execute_job_with_retry(
 
     for attempt in 0..=retries {
         let (success, output) = match job.job_type {
-            JobType::Shell => run_job_command(config, &**security, job).await,
+            JobType::Shell => run_job_command(config, security, job).await,
             JobType::Agent => Box::pin(run_agent_job(config, security.clone(), job)).await,
         };
         last_output = output;

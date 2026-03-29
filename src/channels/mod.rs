@@ -5564,8 +5564,8 @@ pub async fn start_channels(
     }
 
     tokio::select! {
-        _ = run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages) => {},
-        _ = cancel.cancelled() => {
+        () = run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages) => {},
+        () = cancel.cancelled() => {
             tracing::info!("channel supervisor cancelled, shutting down channels");
         }
     }
