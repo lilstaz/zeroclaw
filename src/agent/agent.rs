@@ -365,15 +365,11 @@ impl Agent {
         }
     }
 
-    pub async fn from_config(config: &Config) -> Result<Self> {
+    pub async fn from_config(config: &Config, security: Arc<SecurityPolicy>) -> Result<Self> {
         let observer: Arc<dyn Observer> =
             Arc::from(observability::create_observer(&config.observability));
         let runtime: Arc<dyn runtime::RuntimeAdapter> =
             Arc::from(runtime::create_runtime(&config.runtime)?);
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
 
         let memory: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage_and_routes(
             &config.memory,
@@ -1228,6 +1224,7 @@ pub async fn run(
     provider_override: Option<String>,
     model_override: Option<String>,
     temperature: f64,
+    security: Arc<SecurityPolicy>,
 ) -> Result<()> {
     let start = Instant::now();
 
@@ -1240,7 +1237,7 @@ pub async fn run(
     }
     effective_config.default_temperature = temperature;
 
-    let mut agent = Agent::from_config(&effective_config).await?;
+    let mut agent = Agent::from_config(&effective_config, security).await?;
 
     let provider_name = effective_config
         .default_provider
@@ -1586,7 +1583,11 @@ mod tests {
             .extra_headers
             .insert("X-Title".to_string(), "zeroclaw-web".to_string());
 
-        let mut agent = Agent::from_config(&config)
+        let security = Arc::new(SecurityPolicy::from_config(
+            &config.autonomy,
+            &config.workspace_dir,
+        ));
+        let mut agent = Agent::from_config(&config, security)
             .await
             .expect("agent from config");
         let response = agent.turn("hello").await.expect("agent turn");

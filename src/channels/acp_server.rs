@@ -265,7 +265,11 @@ impl AcpServer {
         let session_id = Uuid::new_v4().to_string();
 
         // Build agent from global config
-        let agent = Agent::from_config(&self.config)
+        let security = Arc::new(crate::security::SecurityPolicy::from_config(
+            &self.config.autonomy,
+            &self.config.workspace_dir,
+        ));
+        let agent = Agent::from_config(&self.config, security)
             .await
             .map_err(|e| RpcError {
                 code: INTERNAL_ERROR,

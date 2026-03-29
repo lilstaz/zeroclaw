@@ -166,7 +166,7 @@ async fn handle_socket(
 
     // Build a persistent Agent for this connection so history is maintained across turns.
     let config = state.config.lock().clone();
-    let mut agent = match crate::agent::Agent::from_config(&config).await {
+    let mut agent = match crate::agent::Agent::from_config(&config, state.security.clone()).await {
         Ok(a) => a,
         Err(e) => {
             tracing::error!(error = %e, "Agent initialization failed");

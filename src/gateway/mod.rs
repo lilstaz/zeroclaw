@@ -28,10 +28,10 @@ use crate::channels::{
 };
 use crate::config::Config;
 use crate::cost::CostTracker;
+use crate::daemon::ConfigReloader;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
-use crate::security::SecurityPolicy;
 use crate::security::pairing::{PairingGuard, constant_time_eq, is_public_bind};
 use crate::tools;
 use crate::tools::canvas::CanvasStore;
@@ -370,6 +370,10 @@ pub struct AppState {
     pub pending_pairings: Option<Arc<api_pairing::PairingStore>>,
     /// Shared canvas store for Live Canvas (A2UI) system
     pub canvas_store: CanvasStore,
+    /// Shared security policy for hot-reload
+    pub security: Arc<crate::security::SecurityPolicy>,
+    /// Config reloader for hot-reload
+    pub reloader: Arc<dyn ConfigReloader>,
     /// WebAuthn state for hardware key authentication (optional, requires `webauthn` feature)
     #[cfg(feature = "webauthn")]
     pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
@@ -377,7 +381,13 @@ pub struct AppState {
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines)]
-pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
+pub async fn run_gateway(
+    host: &str,
+    port: u16,
+    config: Config,
+    security: Arc<crate::security::SecurityPolicy>,
+    reloader: Arc<dyn ConfigReloader>,
+) -> Result<()> {
     // ── Security: warn on public bind without tunnel or explicit opt-in ──
     if is_public_bind(host) && config.tunnel.provider == "none" && !config.gateway.allow_public_bind
     {
@@ -434,10 +444,6 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     )?);
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
         Arc::from(runtime::create_runtime(&config.runtime)?);
-    let security = Arc::new(SecurityPolicy::from_config(
-        &config.autonomy,
-        &config.workspace_dir,
-    ));
 
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
@@ -852,6 +858,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
         canvas_store,
+        security,
+        reloader,
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
             let secret_store = Arc::new(crate::security::SecretStore::new(
@@ -1313,7 +1321,13 @@ async fn run_gateway_chat_with_tools(
     session_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
-    Box::pin(crate::agent::process_message(config, message, session_id)).await
+    Box::pin(crate::agent::process_message(
+        config,
+        message,
+        session_id,
+        state.security.clone(),
+    ))
+    .await
 }
 
 /// Webhook request body
@@ -2343,6 +2357,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2411,6 +2430,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2805,6 +2829,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2883,6 +2912,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2973,6 +3007,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3035,6 +3074,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3102,6 +3146,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3174,6 +3223,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3243,6 +3297,11 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::from_config(
+                &crate::config::AutonomyConfig::default(),
+                &std::path::PathBuf::from("/tmp"),
+            )),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
