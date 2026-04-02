@@ -49,10 +49,11 @@ graph TD
 
 ## 三、Bug 1 — 旧 supervisor 被 token 毒化后死循环
 
-### 触发场景
+### Bug 1 触发场景
+
 PUT /api/config 更新渠道配置（如修改 feishu 的参数），但保留渠道。
 
-### 调用链
+### Bug 1 调用链
 
 ```mermaid
 sequenceDiagram
@@ -79,7 +80,8 @@ sequenceDiagram
     end
 ```
 
-### 证据（日志）
+### Bug 1 证据（日志）
+
 ```
 [DIAG] restart_channels called — old_is_cancelled_before=false   ← 一次
 [DIAG] channels closure invoked: token is_cancelled=true          ← 无限重复
@@ -100,17 +102,19 @@ handles.push(spawn_component_supervisor("channels", ..., move || {
 }));
 ```
 
-### 修复
+### Bug 1 修复
+
 在 `DaemonReloader` 增加 `channels_abort: Mutex<Option<AbortHandle>>`，`restart_channels` 调用前先 abort 旧 supervisor。
 
 ---
 
 ## 四、Bug 2 — 热删除渠道后新 supervisor 死循环
 
-### 触发场景
+### Bug 2 触发场景
+
 PUT /api/config **删除**飞书渠道配置（`channels_config` 中无任何真实渠道）。
 
-### 调用链
+### Bug 2 调用链
 
 ```mermaid
 sequenceDiagram
@@ -136,7 +140,8 @@ sequenceDiagram
     end
 ```
 
-### 证据（日志）
+### Bug 2 证据（日志）
+
 ```
 No sandbox backend available, using application-layer security
 No channels configured. Run `zeroclaw onboard` to set up channels.
@@ -144,7 +149,7 @@ WARN zeroclaw::daemon: Daemon component 'channels' exited unexpectedly
 （以上无限重复，无 token is_cancelled 字样）
 ```
 
-### 根因代码（修复前）
+### Bug 2 根因代码（修复前）
 
 `daemon/mod.rs` `restart_channels`：
 ```rust
@@ -165,7 +170,8 @@ Ok(()) => {
 }
 ```
 
-### 修复
+### Bug 2 修复
+
 `restart_channels` 中检查 `has_supervised_channels(&config)`，若无渠道则只 abort 旧 supervisor，不 spawn 新的：
 
 ```rust

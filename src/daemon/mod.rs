@@ -96,7 +96,9 @@ impl ConfigReloader for DaemonReloader {
         // no channels, which the supervisor treats as an unexpected exit and
         // retries at minimum backoff — causing an infinite restart loop.
         if !has_supervised_channels(&config) {
-            tracing::info!("[DIAG] restart_channels: no supervised channels in new config, skipping supervisor spawn");
+            tracing::info!(
+                "[DIAG] restart_channels: no supervised channels in new config, skipping supervisor spawn"
+            );
             crate::health::mark_component_ok("channels");
             return;
         }
@@ -157,17 +159,13 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             "[DIAG] initial channels supervisor: captured token is_cancelled={}",
             cancel.is_cancelled()
         );
-        let ch_handle = spawn_component_supervisor(
-            "channels",
-            initial_backoff,
-            max_backoff,
-            move || {
+        let ch_handle =
+            spawn_component_supervisor("channels", initial_backoff, max_backoff, move || {
                 let cfg = channels_cfg.clone();
                 let c = (*cancel).clone();
                 let s = sec.clone();
                 async move { Box::pin(crate::channels::start_channels(cfg, c, s)).await }
-            },
-        );
+            });
         let rel = Arc::new(DaemonReloader {
             initial_backoff,
             max_backoff,
