@@ -19,6 +19,7 @@ ignore = [
     { id = "RUSTSEC-2026-0006", reason = "wasmtime segfault via extism; awaiting extism upgrade" },
     { id = "RUSTSEC-2026-0020", reason = "WASI resource exhaustion via extism; awaiting extism upgrade" },
     { id = "RUSTSEC-2026-0021", reason = "WASI http fields panic via extism; awaiting extism upgrade" },
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 via rumqttc 0.24.0; awaiting upstream upgrade" },
 ]
 
 [licenses]
