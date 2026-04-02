@@ -1,8 +1,10 @@
+use arc_swap::ArcSwap;
 use crate::config::Config;
 use anyhow::Result;
 use chrono::Utc;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -45,12 +47,70 @@ async fn wait_for_shutdown_signal() -> Result<()> {
     Ok(())
 }
 
+/// Implemented by the daemon to handle config-triggered lifecycle changes.
+pub trait ConfigReloader: Send + Sync {
+    fn restart_channels(&self, config: Config);
+}
+
+/// No-op reloader for gateway-only mode (no daemon).
+pub struct NoOpConfigReloader;
+
+impl ConfigReloader for NoOpConfigReloader {
+    fn restart_channels(&self, _config: Config) {
+        // No-op - channels aren't managed in gateway-only mode
+    }
+}
+
+/// Daemon's implementation of ConfigReloader.
+pub(crate) struct DaemonReloader {
+    pub initial_backoff: u64,
+    pub max_backoff: u64,
+    pub channel_cancel: Arc<ArcSwap<tokio_util::sync::CancellationToken>>,
+    pub handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
+    pub security: Arc<crate::security::SecurityPolicy>,
+}
+
+impl ConfigReloader for DaemonReloader {
+    fn restart_channels(&self, config: Config) {
+        // Drain completed handles to prevent unbounded growth
+        if let Ok(mut h) = self.handles.lock() {
+            h.retain(|handle| !handle.is_finished());
+        }
+
+        // Swap in a fresh cancellation token and cancel the old one
+        let new_cancel = Arc::new(tokio_util::sync::CancellationToken::new());
+        let old_cancel = self.channel_cancel.swap(new_cancel.clone());
+        old_cancel.cancel();
+
+        let cancel = self.channel_cancel.load().clone();
+        let security = self.security.clone();
+        let initial = self.initial_backoff;
+        let max = self.max_backoff;
+
+        let handle = spawn_component_supervisor("channels", initial, max, move || {
+            let cfg = config.clone();
+            let c = (*cancel).clone();
+            let s = security.clone();
+            async move { Box::pin(crate::channels::start_channels(cfg, c, s)).await }
+        });
+
+        if let Ok(mut h) = self.handles.lock() {
+            h.push(handle);
+        }
+    }
+}
+
 pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
     let initial_backoff = config.reliability.channel_initial_backoff_secs.max(1);
     let max_backoff = config
         .reliability
         .channel_max_backoff_secs
         .max(initial_backoff);
+
+    let security = Arc::new(crate::security::SecurityPolicy::from_config(
+        &config.autonomy,
+        &config.workspace_dir,
+    ));
 
     crate::health::mark_component_ok("daemon");
 
@@ -62,9 +122,42 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
 
     let mut handles: Vec<JoinHandle<()>> = vec![spawn_state_writer(config.clone())];
 
+    let channel_cancel = Arc::new(ArcSwap::from_pointee(
+        tokio_util::sync::CancellationToken::new(),
+    ));
+    let reloader: Arc<dyn ConfigReloader> = if has_supervised_channels(&config) {
+        let channels_cfg = config.clone();
+        let cancel = channel_cancel.load().clone();
+        let sec = security.clone();
+        handles.push(spawn_component_supervisor(
+            "channels",
+            initial_backoff,
+            max_backoff,
+            move || {
+                let cfg = channels_cfg.clone();
+                let c = (*cancel).clone();
+                let s = sec.clone();
+                async move { Box::pin(crate::channels::start_channels(cfg, c, s)).await }
+            },
+        ));
+        Arc::new(DaemonReloader {
+            initial_backoff,
+            max_backoff,
+            channel_cancel: channel_cancel.clone(),
+            handles: std::sync::Mutex::new(vec![]),
+            security: security.clone(),
+        })
+    } else {
+        crate::health::mark_component_ok("channels");
+        tracing::info!("No real-time channels configured; channel supervisor disabled");
+        Arc::new(NoOpConfigReloader)
+    };
+
     {
         let gateway_cfg = config.clone();
         let gateway_host = host.clone();
+        let gateway_security = security.clone();
+        let gateway_reloader = reloader.clone();
         handles.push(spawn_component_supervisor(
             "gateway",
             initial_backoff,
@@ -72,27 +165,13 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             move || {
                 let cfg = gateway_cfg.clone();
                 let host = gateway_host.clone();
-                async move { Box::pin(crate::gateway::run_gateway(&host, port, cfg)).await }
+                let sec = gateway_security.clone();
+                let rel = gateway_reloader.clone();
+                async move {
+                    Box::pin(crate::gateway::run_gateway(&host, port, cfg, sec, rel)).await
+                }
             },
         ));
-    }
-
-    {
-        if has_supervised_channels(&config) {
-            let channels_cfg = config.clone();
-            handles.push(spawn_component_supervisor(
-                "channels",
-                initial_backoff,
-                max_backoff,
-                move || {
-                    let cfg = channels_cfg.clone();
-                    async move { Box::pin(crate::channels::start_channels(cfg)).await }
-                },
-            ));
-        } else {
-            crate::health::mark_component_ok("channels");
-            tracing::info!("No real-time channels configured; channel supervisor disabled");
-        }
     }
 
     // Wire up MQTT SOP listener if configured
@@ -234,7 +313,6 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
     use crate::heartbeat::engine::{
         HeartbeatEngine, HeartbeatTask, TaskPriority, TaskStatus, compute_adaptive_interval,
     };
-    use std::sync::Arc;
 
     let observer: std::sync::Arc<dyn crate::observability::Observer> =
         std::sync::Arc::from(crate::observability::create_observer(&config.observability));

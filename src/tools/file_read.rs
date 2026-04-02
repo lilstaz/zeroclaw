@@ -236,6 +236,7 @@ fn try_extract_pdf_text(_bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
     fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {
@@ -485,7 +486,7 @@ mod tests {
             autonomy: AutonomyLevel::Supervised,
             workspace_dir: workspace,
             workspace_only: false,
-            forbidden_paths: vec![],
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         });
         let tool = FileReadTool::new(security);

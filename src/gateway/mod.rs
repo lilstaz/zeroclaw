@@ -370,6 +370,8 @@ pub struct AppState {
     pub pending_pairings: Option<Arc<api_pairing::PairingStore>>,
     /// Shared canvas store for Live Canvas (A2UI) system
     pub canvas_store: CanvasStore,
+    pub security: Arc<SecurityPolicy>,
+    pub reloader: Arc<dyn crate::daemon::ConfigReloader>,
     /// WebAuthn state for hardware key authentication (optional, requires `webauthn` feature)
     #[cfg(feature = "webauthn")]
     pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
@@ -377,7 +379,13 @@ pub struct AppState {
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines)]
-pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
+pub async fn run_gateway(
+    host: &str,
+    port: u16,
+    config: Config,
+    security: Arc<SecurityPolicy>,
+    reloader: Arc<dyn crate::daemon::ConfigReloader>,
+) -> Result<()> {
     // ── Security: warn on public bind without tunnel or explicit opt-in ──
     if is_public_bind(host) && config.tunnel.provider == "none" && !config.gateway.allow_public_bind
     {
@@ -434,11 +442,6 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     )?);
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
         Arc::from(runtime::create_runtime(&config.runtime)?);
-    let security = Arc::new(SecurityPolicy::from_config(
-        &config.autonomy,
-        &config.workspace_dir,
-    ));
-
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
             config.composio.api_key.as_deref(),
@@ -852,6 +855,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
         canvas_store,
+        security,
+        reloader,
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
             let secret_store = Arc::new(crate::security::SecretStore::new(
@@ -2343,6 +2348,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2411,6 +2418,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2805,6 +2814,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2883,6 +2894,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -2973,6 +2986,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3035,6 +3050,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3102,6 +3119,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3174,6 +3193,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -3243,6 +3264,8 @@ mod tests {
             device_registry: None,
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
+            security: Arc::new(crate::security::SecurityPolicy::default()),
+            reloader: Arc::new(crate::daemon::NoOpConfigReloader),
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };

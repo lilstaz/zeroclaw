@@ -175,6 +175,7 @@ impl Tool for FileWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
     fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {
@@ -558,7 +559,7 @@ mod tests {
             workspace_dir: workspace.clone(),
             workspace_only: false,
             allowed_roots: vec![root.clone()],
-            forbidden_paths: vec![],
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         });
         let tool = FileWriteTool::new(security);

@@ -231,6 +231,7 @@ impl Tool for ImageInfoTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
     use crate::security::{AutonomyLevel, SecurityPolicy};
 
     fn test_security() -> Arc<SecurityPolicy> {
@@ -238,7 +239,7 @@ mod tests {
             autonomy: AutonomyLevel::Full,
             workspace_dir: std::env::temp_dir(),
             workspace_only: false,
-            forbidden_paths: vec![],
+            forbidden_paths: Arc::new(ArcSwap::from_pointee(vec![])),
             ..SecurityPolicy::default()
         })
     }
