@@ -66,18 +66,27 @@ pub(crate) struct DaemonReloader {
     pub initial_backoff: u64,
     pub max_backoff: u64,
     pub channel_cancel: Arc<ArcSwap<tokio_util::sync::CancellationToken>>,
+    /// AbortHandle for the currently running channels supervisor task.
+    /// Kept so restart_channels can terminate the old supervisor's retry loop
+    /// before spawning a new one — preventing the stale-token infinite-restart bug.
+    pub channels_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
     pub handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
     pub security: Arc<crate::security::SecurityPolicy>,
 }
 
 impl ConfigReloader for DaemonReloader {
     fn restart_channels(&self, config: Config) {
-        // Drain completed handles to prevent unbounded growth
-        if let Ok(mut h) = self.handles.lock() {
-            h.retain(|handle| !handle.is_finished());
+        // Abort the current channels supervisor to stop its retry loop.
+        // Without this, the old supervisor keeps re-invoking its closure which
+        // holds a clone of the now-cancelled token, causing an infinite restart.
+        if let Ok(mut h) = self.channels_abort.lock() {
+            if let Some(abort) = h.take() {
+                abort.abort();
+            }
         }
 
-        // Swap in a fresh cancellation token and cancel the old one
+        // Swap in a fresh cancellation token and cancel the old one so any
+        // in-flight start_channels call exits its select branch cleanly.
         let new_cancel = Arc::new(tokio_util::sync::CancellationToken::new());
         let old_cancel = self.channel_cancel.swap(new_cancel.clone());
         old_cancel.cancel();
@@ -94,7 +103,12 @@ impl ConfigReloader for DaemonReloader {
             async move { Box::pin(crate::channels::start_channels(cfg, c, s)).await }
         });
 
+        // Record abort handle so a subsequent restart_channels can stop this supervisor.
+        if let Ok(mut h) = self.channels_abort.lock() {
+            *h = Some(handle.abort_handle());
+        }
         if let Ok(mut h) = self.handles.lock() {
+            h.retain(|h| !h.is_finished());
             h.push(handle);
         }
     }
@@ -129,7 +143,11 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         let channels_cfg = config.clone();
         let cancel = channel_cancel.load().clone();
         let sec = security.clone();
-        handles.push(spawn_component_supervisor(
+        tracing::info!(
+            "[DIAG] initial channels supervisor: captured token is_cancelled={}",
+            cancel.is_cancelled()
+        );
+        let ch_handle = spawn_component_supervisor(
             "channels",
             initial_backoff,
             max_backoff,
@@ -139,14 +157,22 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
                 let s = sec.clone();
                 async move { Box::pin(crate::channels::start_channels(cfg, c, s)).await }
             },
-        ));
-        Arc::new(DaemonReloader {
+        );
+        let rel = Arc::new(DaemonReloader {
             initial_backoff,
             max_backoff,
             channel_cancel: channel_cancel.clone(),
+            channels_abort: std::sync::Mutex::new(None),
             handles: std::sync::Mutex::new(vec![]),
             security: security.clone(),
-        })
+        });
+        // Store abort handle so restart_channels can terminate this supervisor's
+        // retry loop before spawning a replacement.
+        if let Ok(mut h) = rel.channels_abort.lock() {
+            *h = Some(ch_handle.abort_handle());
+        }
+        handles.push(ch_handle);
+        rel
     } else {
         crate::health::mark_component_ok("channels");
         tracing::info!("No real-time channels configured; channel supervisor disabled");
